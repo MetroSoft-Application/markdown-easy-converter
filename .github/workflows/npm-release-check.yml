@@ -1,0 +1,56 @@
+# 公開前に宣言した OS / Node.js の全組み合わせで実変換と tarball の独立導入を検査する。
+# npm-publish.yml からも workflow_call で再利用し、公開するコミットに対して同じ検査を公開直前に必ず通す。
+name: npm release check
+
+on:
+  # タグ push は npm-publish.yml が本ワークフローを呼び出すため、同じ検査の二重実行を避ける。
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+# 検査ジョブはリポジトリの読み取りだけで足りる。公開権限は npm-publish.yml の publish ジョブだけに与える。
+permissions:
+  contents: read
+
+jobs:
+  package-matrix:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22, 24, 26]
+    env:
+      MVE_REQUIRE_BROWSER_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium and Linux system dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright-core install --with-deps chromium
+      - name: Install Chromium
+        if: runner.os != 'Linux'
+        run: npx playwright-core install chromium
+      - run: npm run check
+      - run: npm test
+      - run: npm run test:package
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # ビルド時依存も生成物へバンドルされるため、開発依存を除外しない。
+      - run: npm audit --audit-level=high

@@ -1,0 +1,8 @@
+/**
+ * @fileoverview HTML・PDF出力で参照する本文フォントとKaTeXフォントを読み込む。
+ * スタイルだけを変更し、本文データと編集状態を変更しない。
+ */
+@import "@fontsource/noto-sans-jp/400.css";
+@import "@fontsource/noto-sans-jp/700.css";
+@import "@fontsource/noto-sans-mono/400.css";
+@import "katex/dist/katex.min.css";

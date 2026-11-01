@@ -1,0 +1,33 @@
+/**
+ * @fileoverview HTML/PDF出力に埋め込むフォント、KaTeX、コードブロック用スタイル。
+ */
+@import "./exportFonts.css";
+
+/**
+ * 通常 Markdown のコードブロックのシンタックス色。PDF の pre 背景 (src/shared/printContentCss.ts の #f5f5f5) は明色のため、
+ * HTML 出力の .mve-html 配色 (src/html.ts) と同じ明色向けの値にそろえる。HTML 出力では詳細度が同じため、後ろに置かれる html.ts の HTML_CSS が優先する。
+ * Marp スライド (.marpit 内) はテーマが暗色のコード背景を持ち得るため対象外とし、色をテーマ CSS と継承に任せる。
+ */
+.hljs-keyword:not(.marpit *),
+.hljs-selector-tag:not(.marpit *),
+.hljs-literal:not(.marpit *) {
+    color: #8250df;
+}
+
+.hljs-string:not(.marpit *),
+.hljs-attr:not(.marpit *) {
+    color: #0a3069;
+}
+
+.hljs-title:not(.marpit *),
+.hljs-section:not(.marpit *) {
+    color: #953800;
+}
+
+.hljs-comment:not(.marpit *) {
+    color: #6e7781;
+}
+
+.hljs-number:not(.marpit *) {
+    color: #0550ae;
+}

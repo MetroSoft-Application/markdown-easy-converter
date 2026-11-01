@@ -1,0 +1,65 @@
+{
+  "name": "@metrosoft/markdown-easy-convert",
+  "version": "0.1.0",
+  "description": "CLI for converting Markdown, Textile, and Marp documents to HTML and PDF",
+  "keywords": [
+    "markdown",
+    "textile",
+    "marp",
+    "html",
+    "pdf",
+    "converter",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MetroSoft-Application/markdown-easy-converter.git"
+  },
+  "homepage": "https://github.com/MetroSoft-Application/markdown-easy-converter#readme",
+  "bugs": {
+    "url": "https://github.com/MetroSoft-Application/markdown-easy-converter/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "mve-convert": "dist/mve-convert.cjs"
+  },
+  "files": [
+    "dist/mve-convert.cjs",
+    "dist/print-assets.css",
+    "dist/pele-render-worker.js",
+    "dist/markdown-fallback.js",
+    "dist/output-replacements.js",
+    "dist/third-party-licenses/**",
+    "browsers.json"
+  ],
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
+  },
+  "devDependencies": {
+    "@fontsource/noto-sans-jp": "5.3.0",
+    "@fontsource/noto-sans-mono": "5.3.0",
+    "@marp-team/marp-core": "4.4.0",
+    "@types/node": "24.13.3",
+    "dompurify": "3.4.17",
+    "entities": "4.5.0",
+    "esbuild": "0.28.2",
+    "highlight.js": "11.11.2",
+    "katex": "0.16.47",
+    "marked": "18.0.9",
+    "pele": "1.6.0",
+    "playwright-core": "1.62.1",
+    "textile-js": "2.1.1",
+    "typescript": "7.0.2",
+    "yaml": "2.9.0"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepack": "npm run build",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/cli.test.mjs test/print-assets.test.mjs",
+    "test:package": "node scripts/package-smoke.mjs"
+  }
+}

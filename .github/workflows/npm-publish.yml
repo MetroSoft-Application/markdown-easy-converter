@@ -1,0 +1,82 @@
+# v* タグの push を契機に、全マトリクス検査を通した同一コミットを npm Trusted Publishing (OIDC) で公開する。
+# 前提: パッケージが npm 上に存在し、npm 側の Trusted Publisher に本ファイル名と environment "npm" を登録済みであること。
+# npm は OIDC による初回公開を受け付けないため、初版だけは手動で npm publish する。
+# 長期トークン (NPM_TOKEN) は使わない。失敗時は何も公開されず、タグと package.json の不一致も公開前に止める。
+name: npm publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# 別々のタグを同時に push しても公開を 1 件ずつ直列化し、latest の付与順を push 順に保つ。進行中の公開は中断しない。
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  # 9 ジョブのマトリクス検査より前に、タグと package.json の版の不一致を安価に検出する。
+  verify-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+
+  release-check:
+    needs: verify-tag
+    uses: ./.github/workflows/npm-release-check.yml
+
+  publish:
+    needs: release-check
+    runs-on: ubuntu-latest
+    # npm の Trusted Publisher 設定と同じ environment 名にする。GitHub 側で保護規則を付けると公開を承認制にできる。
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # 公開権限を持つジョブでは、prepack や依存スクリプトから GITHUB_TOKEN を読めないようにする。
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # 公開権限を持つジョブでは他 ref が保存した npm キャッシュを復元しない。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted Publishing には npm 11.5.1 以上が必要。Node 同梱版に依存せず版を固定して再現性を保つ。
+      - run: npm install --global npm@11.21.1
+      # 初版の手動公開後のタグ push や、公開成功後の再実行を失敗扱いにせず、二重公開も試みない。
+      - name: Check whether this version is already published
+        id: published
+        shell: bash
+        run: |
+          spec="$(node -p "const p=require('./package.json'); p.name + '@' + p.version")"
+          if npm view "${spec}" version >/dev/null 2>&1; then
+            echo "::notice::${spec} is already published; skipping npm publish."
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - if: steps.published.outputs.exists != 'true'
+        run: npm ci
+      # npm publish の prepack が dist を再ビルドする。検査済みの依存ロックだけから生成物を作る。
+      # 1.0.0-beta.1 のようなプレリリース版が latest として利用者へ配られないよう、dist-tag を next に分ける。
+      - name: Publish
+        if: steps.published.outputs.exists != 'true'
+        shell: bash
+        run: |
+          tag=latest
+          case "${GITHUB_REF_NAME}" in *-*) tag=next ;; esac
+          npm publish --provenance --access public --tag "${tag}"
