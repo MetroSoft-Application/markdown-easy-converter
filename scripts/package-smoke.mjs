@@ -146,7 +146,7 @@ async function main() {
     await writeFile(path.join(project, 'package.json'), '{"name":"mve-package-consumer","private":true}\n');
     const tarball = path.join(temporary, packed.filename);
     await runNpm(['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], { cwd: project, cache });
-    const installed = path.join(project, 'node_modules', '@metrosoft', 'markdown-easy-convert');
+    const installed = path.join(project, 'node_modules', '@metrosoft', 'markdown-easy-converter');
     const installedMetadata = JSON.parse(await readFile(path.join(installed, 'package.json'), 'utf8'));
     assert.equal(installedMetadata.version, metadata.version);
     const shim = path.join(project, 'node_modules', '.bin',

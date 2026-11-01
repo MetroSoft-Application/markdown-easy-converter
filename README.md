@@ -20,7 +20,7 @@ The browser is not installed with the package. By default, `mve-convert` looks f
 ## Install
 
 ```sh
-npm install --global @metrosoft/markdown-easy-convert
+npm install --global @metrosoft/markdown-easy-converter
 mve-convert --help
 ```
 

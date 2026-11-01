@@ -124,15 +124,19 @@ async function stripLegacyFontFormats(cssPath) {
 
 /**
  * 各 esbuild 出力に含まれる依存のライセンス原文を、同じ配布物内へ複製する。
+ * metafileの相対パスはesbuildの既定absWorkingDirであるprocess.cwd()基準のため、別ディレクトリから
+ * importされた場合(VS Code拡張のビルドなど)も同じ基準で解決する。依存を1件も検出できない場合は
+ * 一覧が空のまま成功しないよう失敗させる。
  * @param inputPaths - すべてのビルド成果物のmetafileに列挙された入力。
  */
 async function writeThirdPartyLicenses(inputPaths) {
   const packages = new Map();
   for (const inputPath of inputPaths) {
-    const absolutePath = path.isAbsolute(inputPath) ? inputPath : path.resolve(root, inputPath);
+    const absolutePath = path.resolve(process.cwd(), inputPath);
     const installedPackage = await findInstalledPackage(absolutePath);
     if (installedPackage) packages.set(`${installedPackage.name}@${installedPackage.version}`, installedPackage);
   }
+  if (packages.size === 0) throw new Error('No bundled dependency packages were found for the license notices.');
 
   const licenseRoot = path.join(outdir, 'third-party-licenses');
   await rm(licenseRoot, { recursive: true, force: true });
@@ -170,7 +174,7 @@ async function writeThirdPartyLicenses(inputPaths) {
 
 /**
  * 入力ファイルを所有するnode_modulesパッケージを、親ディレクトリから特定する。
- * @param inputPath - esbuild metafileが返す絶対入力パス。
+ * @param inputPath - esbuild metafileの入力を絶対パスへ解決した値。
  * @returns 見つかった依存パッケージ。プロジェクト自身やNode組み込み入力ではundefined。
  */
 async function findInstalledPackage(inputPath) {
