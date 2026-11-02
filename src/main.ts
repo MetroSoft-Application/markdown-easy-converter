@@ -7,7 +7,7 @@ import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { BrowserContext, Page } from 'playwright-core';
-import { ensureHtmlExtension, prepareHtmlExport, writePreparedHtml } from './html';
+import { ensureHtmlExtension, prepareHtmlExport, stripUtf8Bom, writePreparedHtml } from './html';
 import { acquirePdfBrowser, closePdfBrowser, PdfBrowserUnavailableError, renderPdf } from './pdf';
 import { closePeleRenderer, MermaidDiagramError, renderPeleMermaid } from './runtime/peleMermaid';
 import { MAX_MERMAID_IMAGE_BYTES, resolveMermaidImageSources } from './runtime/mermaidImages';
@@ -214,13 +214,16 @@ function validateExportConfig(pdf: unknown, html: unknown): void {
     });
 }
 
-/** Resolve JSON settings before touching any output file. */
+/**
+ * Resolve JSON settings before touching any output file.
+ * JSON.parseはBOMを構文エラーとして扱うため、メモ帳などがBOM付きで保存した設定も読めるよう先に除去する。
+ */
 async function loadConfig(args: Arguments, argv: readonly string[]): Promise<Arguments> {
     if (!args.configPath) return args;
     const base = path.dirname(args.configPath);
     let raw: unknown;
     try {
-        raw = JSON.parse(await fs.readFile(args.configPath, 'utf8'));
+        raw = JSON.parse(stripUtf8Bom(await fs.readFile(args.configPath, 'utf8')));
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code) throw error;
         throw new Error(`Invalid JSON configuration: ${error instanceof Error ? error.message : String(error)}`);
@@ -640,7 +643,7 @@ async function convertExclusive(args: Arguments): Promise<readonly string[]> {
         args.signal?.throwIfAborted();
         const page = await context.newPage();
         await page.addScriptTag({ path: path.join(assetDir, 'markdown-fallback.js') });
-        const markdown = args.markdown ?? await fs.readFile(args.input, 'utf8');
+        const markdown = stripUtf8Bom(args.markdown ?? await fs.readFile(args.input, 'utf8'));
         const marp = args.format === 'pdf' && hasMarpFrontMatterCandidate(markdown)
             && isMarpMarkdown(markdown, parseMarpFrontMatter);
         const marpContent = marp ? await renderMarpPdf(page, markdown, args.input, args) : undefined;

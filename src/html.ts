@@ -281,7 +281,7 @@ async function collectDocuments(request: HtmlExportRequest, targetPath: string):
             if (byPath.has(linkedPath)) continue;
             let markdown: string;
             try {
-                markdown = await fs.readFile(linkedUri, 'utf8');
+                markdown = stripUtf8Bom(await fs.readFile(linkedUri, 'utf8'));
             } catch {
                 // 存在しないリンクは元のリンクを残し、他のページの変換を継続する。
                 continue;
@@ -1082,6 +1082,18 @@ function replaceExtension(value: string, extension: string): string {
  */
 export function ensureHtmlExtension(value: string): string {
     return /\.html?$/i.test(value) ? value : `${value}.html`;
+}
+
+/**
+ * テキストファイル（Markdown本文・設定JSON）の先頭にあるUTF-8 BOMを取り除く。
+ * fs.readFileの'utf8'はBOMをU+FEFFとして残し、Markdownでは先頭行の見出しや区切りが行頭と認識されず、
+ * JSON.parseでは構文エラーになるため、解析前に必ず通す。
+ * VS CodeのTextDocumentと同様、先頭1文字だけを対象にし本文中のU+FEFFは保持する。
+ * @param value - ファイルから読み込んだテキスト。
+ * @returns 先頭のBOMを除いた文字列。BOMがなければ入力をそのまま返す。
+ */
+export function stripUtf8Bom(value: string): string {
+    return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
 }
 
 /**

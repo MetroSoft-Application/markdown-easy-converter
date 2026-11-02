@@ -7,3 +7,7 @@
 ## 0.1.1
 
 - Mermaid diagrams that fail to render no longer abort the export.
+
+## 0.1.2
+
+- Markdown and configuration files with a UTF-8 BOM are now read correctly.

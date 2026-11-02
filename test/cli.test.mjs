@@ -195,6 +195,24 @@ test('invalid export settings fail before output is written', async () => {
   });
 });
 
+/**
+ * BOM付きで保存された設定JSONが「Invalid JSON」とならず、設定内容の検証まで進むことを検証する。
+ * 意図的に不正なPDF設定を置き、ブラウザーなしで解析成否だけを判定する。
+ */
+test('a UTF-8 BOM in the configuration file is accepted', async () => {
+  await withDirectory(async (directory) => {
+    const input = path.join(directory, 'input.md');
+    const output = path.join(directory, 'output.pdf');
+    const config = path.join(directory, 'export.json');
+    await writeFile(input, '# Source\n');
+    await writeFile(config, '\uFEFF' + JSON.stringify({ pdf: { format: 'Letter' } }));
+    await assert.rejects(execute(process.execPath,
+      [cli, input, '--format', 'pdf', '--output', output, '--config', config]),
+    (error) => error.code === 2 && /Invalid pdf/.test(error.stderr) && !/Invalid JSON/.test(error.stderr));
+    await assert.rejects(readFile(output), { code: 'ENOENT' });
+  });
+});
+
 /** `--force` でも原文のハードリンク別名は入力として保護する。 */
 test('force refuses an output hard link to the input', async () => {
   await withDirectory(async (directory) => {
@@ -328,6 +346,28 @@ test('unsafe raw HTML is sanitized before export', { skip: !browserPath }, async
     const html = await readFile(output, 'utf8');
     assert.match(html, /Safe/);
     assert.doesNotMatch(html, /<script\b|\bonerror\s*=|javascript:/i);
+  });
+});
+
+/**
+ * UTF-8 BOM付きの入力とリンク先文書でも、先頭行の見出しが文字列のまま残らず見出しとして描画されることを検証する。
+ * fs.readFileはBOMを残すため、除去漏れがあると先頭の `# ` がMarkdown構文として認識されない。
+ */
+test('a UTF-8 BOM does not prevent the first heading from rendering', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const input = path.join(directory, 'bom.md');
+    const linked = path.join(directory, 'linked.md');
+    const output = path.join(directory, 'bom.html');
+    await writeFile(input, '\uFEFF# BomHeadingMarker\r\n\r\n[Linked](linked.md)\r\n');
+    await writeFile(linked, '\uFEFF# BomLinkedMarker\r\n');
+    await execute(process.execPath, [cli, input, '--format', 'html', '--output', output,
+      '--html-linked', '--browser', browserPath]);
+    const html = await readFile(output, 'utf8');
+    // 見出しは本文を見出しアンカーで包むため、<a>の有無に依存せず<h1>内の本文を確認する。
+    assert.match(html, /<h1\b[^>]*>(?:<a\b[^>]*>)?BomHeadingMarker</);
+    assert.doesNotMatch(html, /<p>\s*\uFEFF?#\s*BomHeadingMarker/);
+    const linkedHtml = await readFile(path.join(directory, 'linked.html'), 'utf8');
+    assert.match(linkedHtml, /<h1\b[^>]*>(?:<a\b[^>]*>)?BomLinkedMarker</);
   });
 });
 
