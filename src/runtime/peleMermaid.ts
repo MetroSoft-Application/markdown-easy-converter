@@ -41,6 +41,23 @@ export class PeleRendererUnavailableError extends Error {
     }
 }
 
+/**
+ * 特定のMermaid図を描画できないことを表すエラー。構文エラー、ソース長・SVGサイズの上限超過、不正なSVG、
+ * SVG要素の欠落、図ごとの描画タイムアウト、描画ページを作り直した後の再試行でも続いた描画失敗が該当する。
+ * キャンセルや描画ページを用意できないブラウザー・Workerの障害とは区別し、呼び出し側が図単位でエラー表示へ置き換えて
+ * 文書の出力を続けられるようにする。messageはソース本文や依存関係の詳細を含まない安全な文言に限る。
+ */
+export class MermaidDiagramError extends Error {
+    /**
+     * @param message - 図を描画できなかった理由。ソース本文を含めない。
+     * @param options - 元の例外などの追加情報。causeは診断用で、出力やmessageへは含めない。
+     */
+    constructor(message: string, options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'MermaidDiagramError';
+    }
+}
+
 /** レンダー結果キャッシュの件数上限。 */
 const CACHE_LIMIT = 12;
 /** キャッシュ済みSVG/PNG文字列の合計容量上限。 */
@@ -195,7 +212,7 @@ async function renderQueued(
     renderingNow: number
 ): Promise<PeleMermaidResult> {
     if (signal?.aborted) throw new Error('Mermaid rendering was cancelled.');
-    if (source.length > 50_000) throw new Error('Mermaid source exceeds the 50000 character limit.');
+    if (source.length > 50_000) throw new MermaidDiagramError('Mermaid source exceeds the 50000 character limit.');
     let page = await acquireRendererPage(workerPath, acquireBrowser);
     if (signal?.aborted) {
         await resetRendererPage();
@@ -240,7 +257,8 @@ async function renderQueued(
         });
         if (rendered.error) return { ...rendered, images: [] };
         const document = new DOMParser().parseFromString(rendered.svg, 'image/svg+xml');
-        if (document.querySelector('parsererror')) throw new Error('Pele returned invalid SVG.');
+        // 図の内容に起因する失敗は例外にせずNode側へ返し、MermaidDiagramErrorとして図単位で扱わせる。
+        if (document.querySelector('parsererror')) return { svg: '', links: [], images: [], error: 'Pele returned invalid SVG.' };
         const images = Array.from(document.querySelectorAll('image')).map((image) =>
             image.getAttribute('href')
             ?? image.getAttributeNS('http://www.w3.org/1999/xlink', 'href')
@@ -264,7 +282,9 @@ async function renderQueued(
         } catch (error) {
             await resetRendererPage();
             if (signal?.aborted) throw new Error('Mermaid rendering was cancelled.');
-            if (attempt === 1) throw error;
+            // 作り直したページでも失敗した場合、ブラウザーとWorkerは用意できているため図に起因する失敗として扱う。
+            // ページを用意できない障害はacquireRendererPageがPeleRendererUnavailableErrorなどで中断させる。
+            if (attempt === 1) throw new MermaidDiagramError('Mermaid diagram rendering failed after a retry.', { cause: error });
             page = await acquireRendererPage(workerPath, acquireBrowser);
             if (signal?.aborted) {
                 await resetRendererPage();
@@ -273,7 +293,7 @@ async function renderQueued(
         }
     }
     if (!rendered) throw new Error('Pele Worker did not return a rendering result.');
-    if (rendered.error) throw new Error(rendered.error);
+    if (rendered.error) throw new MermaidDiagramError(rendered.error);
     if (signal?.aborted) throw new Error('Mermaid rendering was cancelled.');
     const imageData = rendered.images.length && options.resolveImages
         ? await options.resolveImages(rendered.images, signal)
@@ -295,14 +315,18 @@ async function renderQueued(
             image.setAttribute('href', dataUri);
         }
         const svg = new XMLSerializer().serializeToString(svgDocument.documentElement);
-        if (svg.length > payload.maxSvgChars) throw new Error('Pele SVG with images exceeds the 12000000 character limit.');
+        // ブラウザー内の例外は型を失うため、図の内容に起因する失敗は戻り値で返しNode側でMermaidDiagramErrorにする。
+        if (svg.length > payload.maxSvgChars) return { diagramError: 'Pele SVG with images exceeds the 12000000 character limit.' };
         const container = document.createElement('div');
         container.id = payload.containerId;
         container.style.cssText = 'width:1200px;background:transparent';
         container.innerHTML = svg;
         document.body.append(container);
         const svgNode = container.querySelector('svg');
-        if (!svgNode) throw new Error('Pele did not return an SVG element.');
+        if (!svgNode) {
+            container.remove();
+            return { diagramError: 'Pele did not return an SVG element.' };
+        }
         const rootRect = svgNode.getBoundingClientRect();
         const linksById = new Map(payload.links.map((link) => [link.id, link]));
         for (const anchor of Array.from(svgNode.querySelectorAll('a'))) {
@@ -348,6 +372,7 @@ async function renderQueued(
         containerId: `${requestId}-container`,
         maxSvgChars: MAX_FINAL_SVG_CHARS
     });
+    if (typeof result.diagramError === 'string') throw new MermaidDiagramError(result.diagramError);
 
     try {
         const finalResult: PeleMermaidResult = {
@@ -355,16 +380,30 @@ async function renderQueued(
             ? result
             : {
                 ...result,
-                pngBase64: (await page.locator(`#${requestId}-container svg`).screenshot({
-                    type: 'png',
-                    animations: 'disabled'
-                })).toString('base64')
+                pngBase64: await captureLargeSvgPng(page, requestId)
             }),
             hasImages: rendered.images.length > 0
         };
         return finalResult;
     } finally {
         await page.evaluate((id) => document.getElementById(id)?.remove(), `${requestId}-container`).catch(() => undefined);
+    }
+}
+
+/**
+ * 大きなSVGのPNG画像を取得する。SVGは描画済みのため、撮影に失敗しても図の失敗にはせずPNGなしで続ける。
+ * @param page - SVGを配置済みの描画ページ。
+ * @param requestId - 撮影するSVGを含むコンテナIDの接頭辞。
+ * @returns PNGのBase64文字列。撮影に失敗した場合はundefined。
+ */
+async function captureLargeSvgPng(page: Page, requestId: string): Promise<string | undefined> {
+    try {
+        return (await page.locator(`#${requestId}-container svg`).screenshot({
+            type: 'png',
+            animations: 'disabled'
+        })).toString('base64');
+    } catch {
+        return undefined;
     }
 }
 
@@ -487,7 +526,8 @@ export async function closePeleRenderer(): Promise<void> {
 }
 
 /**
- * 描画PromiseをAbortSignalと時間制限で待つ。
+ * 描画Promiseを時間制限付きで待つ。時間切れの場合はonTimeoutで描画ページを破棄し、処理の終了を待ってから
+ * MermaidDiagramErrorで失敗させる。次の図は作り直したページで描画できるため、文書全体は中断しない。
  * @param operation - 実行中の処理。
  * @param timeoutMs - 時間制限。
  * @param onTimeout - タイムアウト時の終了処理。
@@ -496,7 +536,8 @@ export async function closePeleRenderer(): Promise<void> {
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, onTimeout: () => Promise<void>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timeoutTriggered = false;
-    const timeoutError = new Error(`Pele rendering timed out after ${timeoutMs}ms.`);
+    // 時間切れ時はonTimeoutで描画ページを破棄して次の図を描けるため、文書全体ではなくその図の失敗として扱う。
+    const timeoutError = new MermaidDiagramError(`Pele rendering timed out after ${timeoutMs}ms.`);
     const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
             timeoutTriggered = true;
@@ -531,7 +572,7 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, onTimeou
 
 /**
  * 共通描画を購読し、最後の呼び出し元がキャンセルした場合にWorkerを停止する。
- * @param operation - 共有描画処理。
+ * @param task - 共有描画処理。
  * @param signal - 呼び出し元からのキャンセル通知。
  * @returns 呼び出し元に返す描画結果。
  */

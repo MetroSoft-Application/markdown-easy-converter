@@ -245,6 +245,77 @@ test('HTML and PDF exports produce rendered output', { skip: !browserPath }, asy
   });
 });
 
+/**
+ * 構文エラーの Mermaid 図が 1 つあっても文書全体の出力を中断せず、その図だけをエラー表示へ置き換えることを確認する。
+ * 回帰リスク: 図ごとの失敗が Promise.all で文書全体の失敗へ広がり、HTML / PDF が一切出力されなくなる。
+ */
+test('a Mermaid syntax error is embedded as an error message without failing the export', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const input = path.join(directory, 'mermaid-error.md');
+    const htmlOutput = path.join(directory, 'mermaid-error.html');
+    const pdfOutput = path.join(directory, 'mermaid-error.pdf');
+    await writeFile(input, [
+      '# Mermaid error marker',
+      '',
+      '```mermaid',
+      'graph TD',
+      '  A[Start] --> B[Finish]',
+      '```',
+      '',
+      '```mermaid',
+      'flowchart THIS_IS_NOT_VALID',
+      '  broken -->',
+      '```',
+      '',
+      'Text after the broken diagram',
+      ''
+    ].join('\n'));
+
+    const { stderr } = await execute(process.execPath,
+      [cli, input, '--format', 'html', '--output', htmlOutput, '--browser', browserPath]);
+    const html = await readFile(htmlOutput, 'utf8');
+    assert.match(html, /<svg\b/);
+    assert.match(html, /data-mermaid-status="error"/);
+    assert.match(html, /<pre class="mermaid-error-message" role="alert">Mermaid syntax error\nMermaid diagram could not be rendered\.<\/pre>/);
+    assert.match(html, /Text after the broken diagram/);
+    assert.match(stderr, /Mermaid diagram 2 could not be rendered \(Mermaid diagram could not be rendered\.\)/);
+
+    await execute(process.execPath,
+      [cli, input, '--format', 'pdf', '--output', pdfOutput, '--browser', browserPath]);
+    const pdf = await readFile(pdfOutput);
+    assert.equal(pdf.toString('ascii', 0, 5), '%PDF-');
+  });
+});
+
+/**
+ * ソース長の上限を超える Mermaid 図も、文書全体を中断せず理由付きのエラー表示へ置き換えることを確認する。
+ * 回帰リスク: 上限超過がブラウザー障害と同じ扱いになり、HTML が出力されなくなる。
+ */
+test('an oversized Mermaid source is embedded as an error message without failing the export', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const input = path.join(directory, 'mermaid-oversized.md');
+    const output = path.join(directory, 'mermaid-oversized.html');
+    await writeFile(input, [
+      '# Oversized diagram',
+      '',
+      '```mermaid',
+      `graph TD\n  A["${'x'.repeat(50_001)}"]`,
+      '```',
+      '',
+      'Text after the oversized diagram',
+      ''
+    ].join('\n'));
+
+    const { stderr } = await execute(process.execPath,
+      [cli, input, '--format', 'html', '--output', output, '--browser', browserPath]);
+    const html = await readFile(output, 'utf8');
+    assert.match(html, /data-mermaid-status="error"/);
+    assert.match(html, /<pre class="mermaid-error-message" role="alert">Mermaid syntax error\nMermaid source exceeds the 50000 character limit\.<\/pre>/);
+    assert.match(html, /Text after the oversized diagram/);
+    assert.match(stderr, /Mermaid diagram 1 could not be rendered \(Mermaid source exceeds the 50000 character limit\.\)/);
+  });
+});
+
 /** 未信頼 Markdown の raw HTML が、配布 HTML に実行可能な属性や URL を残さない。 */
 test('unsafe raw HTML is sanitized before export', { skip: !browserPath }, async () => {
   await withDirectory(async (directory) => {
@@ -324,6 +395,47 @@ test('Marp HTML strips configuration front matter and PDF keeps slide aspect rat
     const aspectRatio = (Number(right) - Number(left)) / (Number(top) - Number(bottom));
     assert.ok(Math.abs(aspectRatio - 16 / 9) < 0.02,
       `expected a 16:9 page, received ratio ${aspectRatio}`);
+  });
+});
+
+/**
+ * Marp スライドでも、構文エラーの Mermaid 図が 1 つあるだけで PDF 出力全体を中断しないことを確認する。
+ * 回帰リスク: スライド内の図ごとの失敗が Promise.all で文書全体の失敗へ広がり、PDF が出力されなくなる。
+ */
+test('a Marp Mermaid syntax error is embedded as an error message without failing the PDF export', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const input = path.join(directory, 'marp-mermaid-error.md');
+    const pdfOutput = path.join(directory, 'marp-mermaid-error.pdf');
+    await writeFile(input, [
+      '---',
+      'marp: true',
+      '---',
+      '',
+      '# Valid diagram slide',
+      '',
+      '```mermaid',
+      'graph TD',
+      '  A[Start] --> B[Finish]',
+      '```',
+      '',
+      '---',
+      '',
+      '# Broken diagram slide',
+      '',
+      '```mermaid',
+      'flowchart THIS_IS_NOT_VALID',
+      '  broken -->',
+      '```',
+      ''
+    ].join('\n'));
+
+    const { stderr } = await execute(process.execPath,
+      [cli, input, '--format', 'pdf', '--output', pdfOutput, '--browser', browserPath]);
+    const pdf = await readFile(pdfOutput);
+    assert.equal(pdf.toString('ascii', 0, 5), '%PDF-');
+    const mediaBoxes = [...pdf.toString('latin1').matchAll(/[/]MediaBox/g)];
+    assert.equal(mediaBoxes.length, 2, 'both Marp slides must still be exported');
+    assert.match(stderr, /Mermaid diagram 1 on slide 2 could not be rendered \(Mermaid diagram could not be rendered\.\)/);
   });
 });
 

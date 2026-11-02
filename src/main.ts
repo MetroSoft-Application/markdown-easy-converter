@@ -9,7 +9,7 @@ import { parse as parseYaml } from 'yaml';
 import type { BrowserContext, Page } from 'playwright-core';
 import { ensureHtmlExtension, prepareHtmlExport, writePreparedHtml } from './html';
 import { acquirePdfBrowser, closePdfBrowser, PdfBrowserUnavailableError, renderPdf } from './pdf';
-import { closePeleRenderer, renderPeleMermaid } from './runtime/peleMermaid';
+import { closePeleRenderer, MermaidDiagramError, renderPeleMermaid } from './runtime/peleMermaid';
 import { MAX_MERMAID_IMAGE_BYTES, resolveMermaidImageSources } from './runtime/mermaidImages';
 import { namespaceMermaidSvg } from './shared/mermaidSvg';
 import { decodeLocalResourceSource } from './shared/resourceCheck';
@@ -20,7 +20,7 @@ import { renderMarpMarkdown } from './renderer/marp/marpRenderer';
 import { createMarpPdfExportContent } from './renderer/marp/marpPdfExport';
 import { prepareExportHtml } from './shared/exportHtml';
 import { printContentCss } from './shared/printContentCss';
-import { SUPPORTED_LANGUAGES, type SupportedLanguage } from './shared/messages';
+import { getMessages, SUPPORTED_LANGUAGES, type SupportedLanguage } from './shared/messages';
 
 /**
  * バンドルを直接読み込むテストが自動検出の失敗を組み立てられるよう再公開する。
@@ -303,6 +303,9 @@ async function readDiagramLocalImage(
 /**
  * DOMPurifyを含む既存のブラウザーレンダラーを実行してから、既存のPele図表ワーカーを実行する。
  * HTMLでは有効なMarp設定だけを除いて通常のMarkdown出力を保ち、ブラウザー起動を繰り返さないようPageを再利用する。
+ * 構文エラーなど`MermaidDiagramError`で失敗した図は、`data-mermaid-status="error"`と`pre.mermaid-error-message`の
+ * エラー表示（ローカライズ済みの見出しと失敗理由）へ置き換えて出力を続け、stderrへ警告する。
+ * キャンセルや描画ページを用意できないブラウザー・Workerの障害は例外として呼び出し側へ伝播する。
  */
 async function renderMarkdownFile(
     page: Page, markdown: string, sourceFile: string, args: Arguments
@@ -332,34 +335,69 @@ async function renderMarkdownFile(
     }, html);
     if (!diagrams.length) return prepareExportHtml(html);
 
-    const rendered = await Promise.all(diagrams.map(async (source, index) => {
-        const result = await renderPeleMermaid(
-            source, args.mermaidTheme === 'auto' ? 'default' : args.mermaidTheme,
-            path.join(assetDir, 'pele-render-worker.js'),
-            () => acquirePdfBrowser(args.language, args.browserPath), args.signal, {
-                fontFamily: args.fontFamily ?? '',
-                fontSize: args.mermaidFontSize,
-                resourceScope: sourceFile,
-                resolveImages: (sources, signal) => resolveMermaidImageSources(
-                    sources,
-                    (image) => readDiagramLocalImage(image, sourceFile, args.workspaceRoot ?? path.dirname(sourceFile)),
-                    signal
-                )
-            }
-        );
+    // 構文エラーなど図そのものの失敗は、プレビューと同じく図単位のエラー表示へ置き換えて文書の出力を続ける。
+    // キャンセル、ブラウザーやWorkerの障害は文書全体を出力できないため、従来どおり例外を伝播して中断する。
+    const rendered = await Promise.all(diagrams.map(async (source, index): Promise<string | MermaidDiagramFailure> => {
+        let result: Awaited<ReturnType<typeof renderPeleMermaid>>;
+        try {
+            result = await renderPeleMermaid(
+                source, args.mermaidTheme === 'auto' ? 'default' : args.mermaidTheme,
+                path.join(assetDir, 'pele-render-worker.js'),
+                () => acquirePdfBrowser(args.language, args.browserPath), args.signal, {
+                    fontFamily: args.fontFamily ?? '',
+                    fontSize: args.mermaidFontSize,
+                    resourceScope: sourceFile,
+                    resolveImages: (sources, signal) => resolveMermaidImageSources(
+                        sources,
+                        (image) => readDiagramLocalImage(image, sourceFile, args.workspaceRoot ?? path.dirname(sourceFile)),
+                        signal
+                    )
+                }
+            );
+        } catch (error) {
+            if (!(error instanceof MermaidDiagramError)) throw error;
+            console.warn(`Mermaid diagram ${index + 1} could not be rendered (${error.message}); an error message was embedded instead.`);
+            return { reason: error.message };
+        }
         return namespaceMermaidSvg(result.svg, `cli-${index}`);
     }));
-    return prepareExportHtml(await page.evaluate(({ markup, svgs }) => {
+    return prepareExportHtml(await page.evaluate(({ markup, svgs, errorMessage }) => {
         const root = document.createElement('div');
         root.innerHTML = markup;
         const nodes = root.querySelectorAll<HTMLElement>('[data-mermaid-source]');
         nodes.forEach((node, index) => {
-            node.innerHTML = svgs[index];
+            const svg = svgs[index];
+            if (typeof svg !== 'string') {
+                // プレビューのエラー表示とclass・roleを揃え、文言はHTMLとして解釈させずtextContentで入れる。
+                const message = document.createElement('pre');
+                message.className = 'mermaid-error-message';
+                message.setAttribute('role', 'alert');
+                message.textContent = `${errorMessage}\n${svg.reason}`;
+                node.replaceChildren(message);
+                node.setAttribute('data-mermaid-status', 'error');
+                return;
+            }
+            node.innerHTML = svg;
             node.setAttribute('data-mermaid-status', 'ready');
         });
         return root.innerHTML;
-    }, { markup: html, svgs: rendered }));
+    }, { markup: html, svgs: rendered, errorMessage: getMessages(args.language).renderer.mermaidError }));
 }
+
+/**
+ * 描画できなかったMermaid図の代わりに出力へ埋め込む情報。
+ * reasonは`MermaidDiagramError`のmessageで、ソース本文や依存関係の詳細を含まない安全な文言に限る。
+ */
+interface MermaidDiagramFailure {
+    reason: string;
+}
+
+/**
+ * Marpスライド内でMermaid図を描画できなかったときのエラー表示用CSS。
+ * エディターのMarpプレビュー（MarpPreview.tsx）が使う配色・余白と一致させ、プレビューとPDFの見た目を揃える。
+ */
+const MARP_MERMAID_ERROR_CSS = '.mve-marp-slide .mve-marp-mermaid-error{display:block;color:#b42318}'
+    + '.mve-marp-slide .mve-marp-mermaid-error-message{margin:.4em 0;white-space:pre-wrap}';
 
 /**
  * Marp YAMLのルート設定だけを有効として認識する。
@@ -374,13 +412,16 @@ function parseMarpFrontMatter(yaml: string): boolean {
 
 /**
  * MarpのスライドをMarp Coreで描き、PDFのページ単位へ包む。
- * Mermaidコードを残したまま成功とみなさず、Peleが失敗した場合は出力を中断する。
+ * 構文エラーなど`MermaidDiagramError`で失敗した図は、エディターのMarpプレビューと同じく元のコードブロックと
+ * エラー文言（ローカライズ済みの見出しと失敗理由）を並べた表示へ置き換えて出力を続け、stderrへ警告する。
+ * キャンセルや描画ページを用意できないブラウザー・Workerの障害は例外として伝播する。
  */
 async function renderMarpPdf(
     page: Page, markdown: string, sourceFile: string, args: Arguments
 ): Promise<{ html: string; css: string }> {
     const rendered = renderMarpMarkdown(markdown, '');
     const slides: string[] = [];
+    let hasDiagramError = false;
     for (let index = 0; index < rendered.slides.length; index += 1) {
         const slide = rendered.slides[index];
         const blocks = await page.evaluate((markup) => {
@@ -392,40 +433,70 @@ async function renderMarpPdf(
                     ? [{ position, source: code.textContent ?? '' }] : [];
             });
         }, slide);
-        const svgs = await Promise.all(blocks.map(async (block) => {
-            const result = await renderPeleMermaid(
-                block.source, args.mermaidTheme === 'auto' ? 'default' : args.mermaidTheme,
-                path.join(assetDir, 'pele-render-worker.js'),
-                () => acquirePdfBrowser(args.language, args.browserPath), args.signal, {
-                    fontFamily: args.fontFamily ?? '',
-                    fontSize: args.mermaidFontSize,
-                    resourceScope: sourceFile,
-                    resolveImages: (sources, signal) => resolveMermaidImageSources(
-                        sources,
-                        (image) => readDiagramLocalImage(image, sourceFile, args.workspaceRoot ?? path.dirname(sourceFile)),
-                        signal
-                    )
-                }
-            );
+        // 通常文書と同じく、図そのものの失敗だけを図単位のエラー表示へ置き換え、基盤の障害は伝播して中断する。
+        const svgs = await Promise.all(blocks.map(async (block, blockIndex): Promise<string | MermaidDiagramFailure> => {
+            let result: Awaited<ReturnType<typeof renderPeleMermaid>>;
+            try {
+                result = await renderPeleMermaid(
+                    block.source, args.mermaidTheme === 'auto' ? 'default' : args.mermaidTheme,
+                    path.join(assetDir, 'pele-render-worker.js'),
+                    () => acquirePdfBrowser(args.language, args.browserPath), args.signal, {
+                        fontFamily: args.fontFamily ?? '',
+                        fontSize: args.mermaidFontSize,
+                        resourceScope: sourceFile,
+                        resolveImages: (sources, signal) => resolveMermaidImageSources(
+                            sources,
+                            (image) => readDiagramLocalImage(image, sourceFile, args.workspaceRoot ?? path.dirname(sourceFile)),
+                            signal
+                        )
+                    }
+                );
+            } catch (error) {
+                if (!(error instanceof MermaidDiagramError)) throw error;
+                console.warn(`Mermaid diagram ${blockIndex + 1} on slide ${index + 1} could not be rendered (${error.message}); an error message was embedded instead.`);
+                return { reason: error.message };
+            }
             return namespaceMermaidSvg(result.svg, `cli-marp-${index}-${block.position}`);
         }));
-        slides.push(await page.evaluate(({ markup, positions, diagrams }) => {
+        if (svgs.some((svg) => typeof svg !== 'string')) hasDiagramError = true;
+        slides.push(await page.evaluate(({ markup, positions, diagrams, errorMessage }) => {
             const root = document.createElement('div');
             root.innerHTML = markup;
             const pre = [...root.querySelectorAll('pre')];
             positions.forEach((position, blockIndex) => {
+                const source = pre[position];
+                const diagram = diagrams[blockIndex];
                 const container = document.createElement('div');
-                container.className = 'mve-marp-mermaid';
-                container.setAttribute('role', 'img');
-                container.innerHTML = diagrams[blockIndex];
-                pre[position]?.replaceWith(container);
+                if (typeof diagram !== 'string') {
+                    // エディターのMarpプレビューとclass・role・要素構成を揃え、文言はHTMLとして解釈させずtextContentで入れる。
+                    container.className = 'mve-marp-mermaid mve-marp-mermaid-error';
+                    container.setAttribute('role', 'group');
+                    if (source) container.append(source.cloneNode(true));
+                    const message = document.createElement('p');
+                    message.className = 'mve-marp-mermaid-error-message';
+                    message.setAttribute('role', 'alert');
+                    message.textContent = `${errorMessage}\n${diagram.reason}`;
+                    container.append(message);
+                } else {
+                    container.className = 'mve-marp-mermaid';
+                    container.setAttribute('role', 'img');
+                    container.innerHTML = diagram;
+                }
+                source?.replaceWith(container);
             });
             return root.innerHTML;
-        }, { markup: slide, positions: blocks.map((block) => block.position), diagrams: svgs }));
+        }, {
+            markup: slide,
+            positions: blocks.map((block) => block.position),
+            diagrams: svgs,
+            errorMessage: getMessages(args.language).renderer.mermaidError
+        }));
     }
     const content = createMarpPdfExportContent(slides, rendered.css);
     if (!content) throw new Error('Marp document contains no slides.');
-    return { html: content.html, css: content.css };
+    // エラー表示はエディターのMarpプレビューと同じ配色・余白にする。正常な図の既存出力を変えないよう、失敗時だけ追加する。
+    const css = hasDiagramError ? `${content.css}\n${MARP_MERMAID_ERROR_CSS}` : content.css;
+    return { html: content.html, css };
 }
 
 /**

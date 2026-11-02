@@ -5,7 +5,7 @@
 - Headings, lists, task lists, tables, footnotes, and a `[toc]` table of contents
 - Syntax-highlighted code blocks
 - Math with KaTeX (`$...$` and `$$...$$`)
-- Mermaid diagrams rendered to SVG
+- Mermaid diagrams rendered to SVG; in regular documents and Marp slide decks, a diagram that cannot be rendered (for example, a syntax error) is replaced by an error message, the rest of the document is still exported, and a warning is written to stderr (exit code 0)
 - Marp slide decks (PDF output only; HTML output renders the slide source as a regular document)
 - HTML with an optional heading outline sidebar, embedded images, and recursive conversion of linked documents
 - PDF paper sizes `A0`–`A6`, `B4`, and `B5`, with configurable margins, fonts, headers, and footers
