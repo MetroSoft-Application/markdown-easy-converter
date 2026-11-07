@@ -1,6 +1,6 @@
 {
   "name": "@metrosoft/markdown-easy-converter",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "CLI for converting Markdown, Textile, and Marp documents to HTML and PDF",
   "keywords": [
     "markdown",
