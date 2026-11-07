@@ -10,10 +10,13 @@ import {
     type EditorTheme,
     type NormalizedPdfOptions,
     type PdfOptions,
-    type PdfPaperFormat
+    type PdfPaperFormat,
+    type PdfTextAlign
 } from './shared/protocol';
 import { getMessages, type SupportedLanguage } from './shared/messages';
 import { DEFAULT_FONT_FAMILY_STACK, fontFamilyForCss } from './shared/fontFamily';
+import { localImageRejection, warnLocalFile, type LocalImagePolicy } from './localFiles';
+import { LITERAL_BRACE } from './documentMetadata';
 
 /**
  * PDF出力へ渡すHTML、CSS、設定、保存先をまとめた要求。
@@ -32,6 +35,10 @@ export interface PdfExportRequest {
      */
     options: PdfOptions;
     /**
+     * PDFの文書タイトル。未エスケープの値で、Chromiumが`<title>`から文書情報へ転記する。
+     */
+    title: string;
+    /**
      * PDF見出し色を選ぶ編集テーマ。未指定の旧要求はダークテーマ色へフォールバックする。
      */
     editorTheme?: EditorTheme;
@@ -43,6 +50,14 @@ export interface PdfExportRequest {
     browserPath?: string;
     /** Marp PDFではCSSのスライド寸法を優先する。省略時は選択用紙を使う。 */
     preferCssPageSize?: boolean;
+    /** 組み込みの印刷CSSより後ろに追加し、上書きできるようにする利用者のCSS。 */
+    customCss?: string;
+    /** ローカル画像の読み込み方針と警告の通知先。省略時は場所を制限せず標準エラーへ通知する。 */
+    imagePolicy?: LocalImagePolicy;
+    /** ブラウザー起動の待機時間（ミリ秒）。省略時は既定の5秒。 */
+    browserTimeoutMs?: number;
+    /** HTML構築からPDF生成までの合計の待機時間（ミリ秒）。省略時は既定の60秒。 */
+    renderTimeoutMs?: number;
     /**
      * PDF生成時のエラーやstatusに使う表示言語。
      */
@@ -108,7 +123,7 @@ const PDF_CONTEXT_CLOSE_TIMEOUT_MS = 2_000;
  */
 export async function renderPdf(request: PdfExportRequest): Promise<Buffer> {
     return renderPdfWithProfile(request, {
-        renderTimeoutMs: PDF_EXPORT_RENDER_TIMEOUT_MS,
+        renderTimeoutMs: request.renderTimeoutMs ?? PDF_EXPORT_RENDER_TIMEOUT_MS,
         assetTimeoutMs: PDF_ASSET_TIMEOUT_MS,
         tagged: true,
         outline: true
@@ -139,7 +154,7 @@ export async function renderPdfWithProfile(
     const browser = await withRenderControl(
 
 
-        () => acquirePdfBrowser(request.language, request.browserPath),
+        () => acquirePdfBrowser(request.language, request.browserPath, request.browserTimeoutMs),
         request.signal,
         deadlineAt,
         'browser launch'
@@ -158,7 +173,7 @@ export async function renderPdfWithProfile(
         };
 
 
-     const abortContext = () => { void closeContext(); };
+    const abortContext = () => { void closeContext(); };
     request.signal?.addEventListener('abort', abortContext, { once: true });
     try {
         context = await withRenderControl(
@@ -228,7 +243,11 @@ export async function renderPdfWithProfile(
         await withRenderControl(
 
 
-            () => page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 10_000 }),
+            // 既定の60秒では従来の10秒のまま。全体の期限を延ばした巨大な文書で、ここだけ先に切れないよう比例させる。
+            () => page.setContent(html, {
+                waitUntil: 'domcontentloaded',
+                timeout: Math.max(10_000, profile.renderTimeoutMs / 6)
+            }),
             request.signal,
             deadlineAt,
             'DOM load',
@@ -276,15 +295,17 @@ export async function renderPdfWithProfile(
                 ...pdfPaperOptions(options.format, options.orientation),
                 printBackground: true,
                 preferCSSPageSize: request.preferCssPageSize === true,
-                ...(request.preferCssPageSize !== true ? { margin: {
-                    top: `${options.margins.top}mm`,
-                    right: `${options.margins.right}mm`,
-                    bottom: `${options.margins.bottom}mm`,
-                    left: `${options.margins.left}mm`
-                } } : {}),
+                ...(request.preferCssPageSize !== true ? {
+                    margin: {
+                        top: `${options.margins.top}mm`,
+                        right: `${options.margins.right}mm`,
+                        bottom: `${options.margins.bottom}mm`,
+                        left: `${options.margins.left}mm`
+                    }
+                } : {}),
                 displayHeaderFooter: Boolean(options.header || options.footer),
-                headerTemplate: template(options.header),
-                footerTemplate: template(options.footer, true),
+                headerTemplate: template(options.header, options.headerAlign, options),
+                footerTemplate: template(options.footer, options.footerAlign, options),
                 tagged: profile.tagged,
                 outline: profile.outline
             }),
@@ -417,12 +438,15 @@ export async function closePdfBrowser(): Promise<void> {
  * 既存の共有Chromiumを再利用し、なければ新規起動して利用数を記録する。
  * @param language - ブラウザー起動失敗時のメッセージに使う表示言語。
  * @param browserPath - 明示されたEdge/Chromeの実行ファイル。省略時は検出順を使う。
+ * @param timeoutMs - 起動の待機時間（ミリ秒）。省略時は既定の5秒。起動済みのブラウザーには影響しない。
  * @returns PDF生成に使う接続済みPlaywright Browser。
  */
-export async function acquirePdfBrowser(language: SupportedLanguage, browserPath?: string): Promise<Browser> {
+export async function acquirePdfBrowser(
+    language: SupportedLanguage, browserPath?: string, timeoutMs: number = PDF_BROWSER_LAUNCH_TIMEOUT_MS
+): Promise<Browser> {
     if (sharedBrowser?.isConnected()) return sharedBrowser;
     if (!sharedBrowserPromise) {
-        sharedBrowserPromise = launchPdfBrowser(language, browserPath).then(
+        sharedBrowserPromise = launchPdfBrowser(language, browserPath, timeoutMs).then(
             /**
              * PDF用ブラウザーを共有状態へ登録し、切断時の状態更新を設定する。
              * @param browser - 起動済みのPlaywright Browser。
@@ -458,19 +482,21 @@ export async function buildStandaloneHtml(request: PdfExportRequest): Promise<st
     // 危険なHTMLを除去し、ローカル画像を埋め込んだ本文と印刷用CSSからHTMLを作る。
     const options = normalizePdfOptions(request.options);
     let body = stripUnsafeMarkup(request.html);
-    body = await embedLocalImages(body, request.documentPath);
+    body = await embedLocalImages(body, request.documentPath, request.imagePolicy ?? {});
     const css = request.css.replace(/<\/style/gi, '<\\/style');
+    const customCss = (request.customCss ?? '').replace(/<\/style/gi, '<\\/style');
     const pageSizeCss = request.preferCssPageSize ? '' : '@page { size: auto; }';
-    return `<!doctype html><html lang="${request.language}"><head><meta charset="utf-8"><style>${css}\n${pageSizeCss}\n${PRINT_CSS}\n${printOptionsCss(options, request.editorTheme)}</style></head><body><main class="mve-print">${body}</main></body></html>`;
+    return `<!doctype html><html lang="${request.language}"><head><meta charset="utf-8"><title>${escapeHtml(request.title)}</title><style>${css}\n${pageSizeCss}\n${PRINT_CSS}\n${printOptionsCss(options, request.editorTheme)}${customCss ? `\n${customCss}` : ''}</style></head><body><main class="mve-print">${body}</main></body></html>`;
 }
 
 /**
  * PDFの外部参照を出力へ埋め込む。
  * @param html - 画像参照を書き換えるPDF本文のHTML。
  * @param documentUri - 画像の相対参照を解決する基準Markdown文書URI。
-
+ * @param policy - 読み込むローカルファイルの方針と警告の通知先。
+ * @returns 読み込めた画像だけをData URLへ置き換えたHTML本文。
  */
-async function embedLocalImages(html: string, documentPath: string): Promise<string> {
+async function embedLocalImages(html: string, documentPath: string, policy: LocalImagePolicy): Promise<string> {
     // HTML内の相対画像を解決し、読み込めた画像だけをData URLへ置き換える。
     const matches = [...html.matchAll(/<img\b[^>]*>/gi)];
     let result = html;
@@ -484,6 +510,11 @@ async function embedLocalImages(html: string, documentPath: string): Promise<str
         try {
             const imageUri = resolveLocalImageUri(documentPath, original);
             if (!imageUri) continue;
+            const rejection = await localImageRejection(imageUri, policy);
+            if (rejection) {
+                warnLocalFile(policy, original, rejection);
+                continue;
+            }
             const bytes = await fs.readFile(imageUri);
             // 画像の拡張子からMIMEタイプを決め、Base64のData URLを作る。
             const mime = mimeFromPath(imageUri);
@@ -601,21 +632,25 @@ export class PdfBrowserUnavailableError extends Error {
 /**
  * 設定済みまたはインストール済みブラウザーを探し、PDF印刷に使うChromiumを起動する。
  * @param language - ブラウザー起動失敗時のメッセージに使う表示言語。
+ * @param browserPath - 明示されたブラウザーの実行ファイル。
+ * @param timeoutMs - 各候補の起動を待つ時間（ミリ秒）。
  * @returns 起動したPlaywright Browser。
  * @throws PdfBrowserUnavailableError - ブラウザーが明示されず、Edge と Chrome のどちらも起動できない場合。
  *   明示されたブラウザーの起動失敗は Playwright の例外をそのまま投げる。
  */
-async function launchPdfBrowser(language: SupportedLanguage, browserPath?: string): Promise<Browser> {
+async function launchPdfBrowser(language: SupportedLanguage, browserPath: string | undefined, timeoutMs: number): Promise<Browser> {
     // Playwrightを遅延ロードし、設定・Edge・Chromeの順にPDF用ブラウザを探す。
     const { chromium } = await import('playwright-core');
     const configured = browserPath?.trim() ?? '';
-    if (configured) return chromium.launch({ executablePath: configured, headless: true, timeout: PDF_BROWSER_LAUNCH_TIMEOUT_MS });
+    // Playwrightの既定のSIGINT処理はプロセスを即時終了し、CLIの中断処理（資源の解放と--jsonの結果出力）を飛ばす。
+    const shared = { headless: true, timeout: timeoutMs, handleSIGINT: false };
+    if (configured) return chromium.launch({ ...shared, executablePath: configured });
 
     try {
-        return await chromium.launch({ channel: 'msedge', headless: true, timeout: PDF_BROWSER_LAUNCH_TIMEOUT_MS });
+        return await chromium.launch({ ...shared, channel: 'msedge' });
     } catch (edgeError) {
         try {
-            return await chromium.launch({ channel: 'chrome', headless: true, timeout: PDF_BROWSER_LAUNCH_TIMEOUT_MS });
+            return await chromium.launch({ ...shared, channel: 'chrome' });
         } catch (chromeError) {
             throw new PdfBrowserUnavailableError(getMessages(language).host.pdfBrowserUnavailable, edgeError, chromeError);
         }
@@ -638,16 +673,21 @@ function stripUnsafeMarkup(value: string): string {
 /**
  * ヘッダーまたはフッターHTMLを作り、ページ番号placeholderと表示文字列をHTML安全化する。
  * @param value - ページ番号プレースホルダーを含むヘッダーまたはフッター文字列。
- * @param footer - trueならフッター用に中央揃えし、falseならヘッダー用に左揃えする。
-
+ * @param align - 文字揃え。
+ * @param style - 文字サイズ（pt）と左右の余白（mm）。既定の6ptと15mmは従来の8px、15mmと同じ表示になる。
+ * @returns Chromiumのヘッダー・フッターテンプレート。文字列が空なら空の要素。
  */
-function template(value: string, footer = false): string {
+export function template(
+    value: string, align: PdfTextAlign,
+    style: Pick<NormalizedPdfOptions, 'headerFooterFontSize' | 'headerFooterPadding'>
+): string {
     // ヘッダーまたはフッター文字列をHTMLへ変換し、ページ番号プレースホルダーを展開する。
     if (!value) return '<span></span>';
     const safe = escapeHtml(value)
         .replace(/\{page\}/g, '<span class="pageNumber"></span>')
-        .replace(/\{pages\}/g, '<span class="totalPages"></span>');
-    return `<div style="font-size:8px;width:100%;padding:0 15mm;text-align:${footer ? 'center' : 'left'};color:#666">${safe}</div>`;
+        .replace(/\{pages\}/g, '<span class="totalPages"></span>')
+        .replaceAll(LITERAL_BRACE, '{');
+    return `<div style="font-size:${style.headerFooterFontSize}pt;width:100%;padding:0 ${style.headerFooterPadding}mm;text-align:${align};color:#666">${safe}</div>`;
 }
 
 /**

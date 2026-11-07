@@ -7,7 +7,7 @@ import { isIP, type LookupFunction } from 'node:net';
 import { request as httpsRequest } from 'node:https';
 
 /** Mermaid図ごとに取得する画像の件数上限。 */
-const MAX_IMAGE_COUNT = 8;
+export const MAX_IMAGE_COUNT = 8;
 /** Mermaid図1件から読み込む画像1枚の最大バイト数。 */
 export const MAX_MERMAID_IMAGE_BYTES = 2 * 1024 * 1024;
 /** HTTP応答から保持する画像1件の上限。 */

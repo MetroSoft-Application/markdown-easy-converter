@@ -6,22 +6,24 @@ import { isTextReplacementPatternValid, type TextReplacementRule } from './share
 import { prepareExportHtml } from './shared/exportHtml';
 
 /**
- * 同一ルールを本文、説明属性、PDFヘッダー・フッターへ順に適用する。
+ * 同一ルールを本文、説明属性、PDFヘッダー・フッター、文書タイトルへ順に適用する。
+ * 置換で隠した文字列がタイトルやPDFメタデータから漏れないよう、タイトルも必ず対象に含める。
  * @param html - 描画済みの出力本文。
  * @param rules - 保存済み順序の置換ルール。
  * @param header - PDFヘッダー。HTMLでは空文字列。
  * @param footer - PDFフッター。HTMLでは空文字列。
- * @returns 置換済みHTMLとヘッダー・フッター。
+ * @param title - HTMLの`<title>`またはPDFの文書タイトル。
+ * @returns 置換済みのHTML、ヘッダー・フッター、タイトル。
  */
 export async function replaceOutputHtml(
-  html: string, rules: readonly TextReplacementRule[], header = '', footer = ''
-): Promise<{ html: string; header: string; footer: string }> {
-  if (!rules.some((rule) => rule.pattern.length > 0)) return { html, header, footer };
+  html: string, rules: readonly TextReplacementRule[], header = '', footer = '', title = ''
+): Promise<{ html: string; header: string; footer: string; title: string }> {
+  if (!rules.some((rule) => rule.pattern.length > 0)) return { html, header, footer, title };
   const root = document.createElement('div');
   root.innerHTML = prepareExportHtml(html);
-  const values = [header, footer];
+  const values = [header, footer, title];
   await applyTextReplacements(root, rules, values, () => true);
-  return { html: prepareExportHtml(root.innerHTML), header: values[0], footer: values[1] };
+  return { html: prepareExportHtml(root.innerHTML), header: values[0], footer: values[1], title: values[2] };
 }
 
 /** 正規表現の処理が上限時間内に終わらなかった場合に使うエラー。 */

@@ -22,6 +22,8 @@ import {
 import { renderTextile } from './shared/textileAdapter';
 import { isDocumentRelativeResourcePath, workspaceRootPathSegments } from './shared/resourceLink';
 import { decodeLocalResourceSource } from './shared/resourceCheck';
+import { extractDocumentMetadata, resolveRenderFormat, type DocumentRenderFormat, type FrontMatterMode } from './documentMetadata';
+import { isPathInsideRoot, localImageRejection, warnIfLocalImageMissing, warnLocalFile, type LocalImagePolicy } from './localFiles';
 
 /**
  * HTMLで送受信するメッセージまたは要求のデータ形状。
@@ -29,9 +31,35 @@ import { decodeLocalResourceSource } from './shared/resourceCheck';
 export interface HtmlExportRequest {
 
     /**
-     * 解析・編集・変換の対象となるMarkdown本文。
+     * 解析・編集・変換の対象となる、front matterを除去済みのMarkdown本文。
      */
     markdown: string;
+
+    /**
+     * 設定で明示された描画形式。省略時は文書ごとに拡張子から決める。
+     */
+    renderFormat?: DocumentRenderFormat;
+
+    /**
+     * リンク先文書のfront matterの扱い。省略時は`auto`。
+     */
+    frontMatter?: FrontMatterMode;
+
+    /**
+     * 組み込みのCSSより後ろに追加し、上書きできるようにする利用者のCSS。
+     */
+    customCss?: string;
+
+    /**
+     * ローカル画像とリンク先文書の読み込み方針、および警告の通知先。省略時は場所を制限せず標準エラーへ通知する。
+     */
+    imagePolicy?: LocalImagePolicy;
+
+    /**
+     * 設定時はファイルへ書かず、完成したHTMLをこの関数へ渡す（標準出力への出力用）。
+     * リンク先文書と併用しない前提で、呼び出し側が引数の検証で排除する。
+     */
+    emit?: (html: string) => Promise<void>;
 
     /**
      * 表示または出力するHTML本文。
@@ -107,9 +135,14 @@ export interface HtmlDocument {
     sourcePath: string;
 
     /**
-     * 解析・編集・変換の対象となるMarkdown本文。
+     * 解析・編集・変換の対象となる、front matterを除去済みのMarkdown本文。
      */
     markdown: string;
+
+    /**
+     * front matterで指定されたタイトル。リンク先文書の出力タイトルを決めるために保持する。
+     */
+    frontMatterTitle?: string;
 
     /**
      * 表示または出力するHTML本文。
@@ -152,6 +185,11 @@ export interface HtmlRenderedDocument {
      * 表示または出力するHTML本文。
      */
     html: string;
+
+    /**
+     * `<title>`へ出力する、出力置換を適用済みで未エスケープのタイトル。
+     */
+    title: string;
 }
 
 /**
@@ -171,7 +209,8 @@ export async function prepareHtmlExport(request: HtmlExportRequest): Promise<Htm
  * 検査済みの出力計画を保存し、overwriteがtrueでない限り既存ファイルを保護する。
  * @param request - HTML本文・CSS・元文書URI・言語・フォント・出力設定をまとめた要求。
  * @param preparation - HTML保存先URIと、出力対象文書のレコード一覧。
- * @param renderedDocuments - リンク先文書をCLIで描画した識別子付きHTMLの一覧。
+ * @param renderedDocuments - 主文書とリンク先文書をCLIで描画した識別子付きHTMLとタイトルの一覧。
+ *   一覧にない文書は準備時のHTMLを使い、タイトルはファイル名とする。
  * @param signal - 中断時に残りのファイル書き込みを止める通知。
  * @returns 保存したHTMLファイルのURIと、出力で参照するファイルURI一覧。
  */
@@ -187,12 +226,16 @@ export async function writePreparedHtml(
          * @param document - CLIで描画された識別子とHTML本文を持つ結果レコード。
          * @returns 識別子を取り出した変換結果の一覧。
          */
-        (document) => [normalizePath(document.id), document.html]));
+        (document) => [normalizePath(document.id), document]));
     const documents = preparation.documents.map(
-        (document) => ({
-            ...document,
-            html: renderedById.get(normalizePath(document.sourcePath)) ?? document.html
-        }));
+        (document) => {
+            const rendered = renderedById.get(normalizePath(document.sourcePath));
+            return {
+                ...document,
+                html: rendered?.html ?? document.html,
+                title: rendered?.title ?? path.basename(document.sourcePath, path.extname(document.sourcePath))
+            };
+        });
     const output = await Promise.all(documents.map(
         /**
          * 各documentからhtmlを取り出して一覧化する。
@@ -208,7 +251,8 @@ export async function writePreparedHtml(
                 documents,
                 request.options,
                 request.language,
-                request.workspaceRoot
+                request.workspaceRoot,
+                request.imagePolicy ?? {}
             );
             const standalone = buildStandaloneHtml(
                 body,
@@ -216,11 +260,17 @@ export async function writePreparedHtml(
                 request.language,
                 document.markdown,
                 request.options,
+                document.title,
                 request.fontFamily,
-                getHtmlRenderFormat(document.sourcePath),
-                request.editorTheme
+                resolveRenderFormat(document.sourcePath, request.renderFormat),
+                request.editorTheme,
+                request.customCss
             );
             signal?.throwIfAborted();
+            if (request.emit) {
+                await request.emit(standalone);
+                return document.outputPath;
+            }
             await fs.mkdir(path.dirname(document.outputPath), { recursive: true });
             signal?.throwIfAborted();
             await fs.writeFile(document.outputPath, standalone, {
@@ -279,18 +329,28 @@ async function collectDocuments(request: HtmlExportRequest, targetPath: string):
             if (!linkedUri || !isMarkdownPath(linkedUri)) continue;
             const linkedPath = normalizePath(linkedUri);
             if (byPath.has(linkedPath)) continue;
-            let markdown: string;
+            const policy = request.imagePolicy ?? {};
+            let source: string;
             try {
-                markdown = stripUtf8Bom(await fs.readFile(linkedUri, 'utf8'));
+                if (policy.restrictRoot && !await isPathInsideRoot(policy.restrictRoot, linkedUri)) {
+                    warnLocalFile(policy, reference.source, 'was not converted because it is outside the workspace root.');
+                    continue;
+                }
+                source = stripUtf8Bom(await fs.readFile(linkedUri, 'utf8'));
             } catch {
                 // 存在しないリンクは元のリンクを残し、他のページの変換を継続する。
+                warnLocalFile(policy, reference.source, 'could not be read.');
                 continue;
             }
+            const renderFormat = resolveRenderFormat(linkedUri, request.renderFormat);
+            // front matter内のリンク風文字列を追跡せず、アウトラインにも出さないよう、以降は本文だけを扱う。
+            const { body: markdown, frontMatterTitle } = extractDocumentMetadata(source, renderFormat, request.frontMatter);
             const linkedDocument: HtmlDocument = {
                 uri: linkedUri,
                 sourcePath: linkedUri,
                 markdown,
-                html: renderLinkedMarkdown(markdown, getHtmlRenderFormat(linkedUri)),
+                frontMatterTitle,
+                html: renderLinkedMarkdown(markdown, renderFormat),
                 outputPath: outputPathFor(linkedUri, rootPath, targetPath)
             };
             byPath.set(linkedPath, linkedDocument);
@@ -387,9 +447,11 @@ function renderLinkedMarkdown(markdown: string, format: 'markdown' | 'mixed' | '
  * @param language - html要素のlang属性に設定する言語コード。
  * @param markdown - HTML本文の元になったMarkdown。アウトライン生成に使う。
  * @param options - HTML出力時の画像・リンク・アウトライン表示設定。
+ * @param title - `<title>`へ出力する未エスケープの文書タイトル。
  * @param fontFamily - 生成HTMLの本文へ適用するフォントファミリー。
  * @param renderFormat - アウトラインを作るMarkdownまたはTextileの描画形式。
  * @param editorTheme - 白いHTML背景で見出しを判読できる色を選ぶテーマ。未指定時はダークテーマ。
+ * @param customCss - 組み込みのCSSを上書きできるよう、最後に追加する利用者のCSS。
  * @returns 単体で表示・保存できるHTML文書。
  */
 function buildStandaloneHtml(
@@ -398,18 +460,21 @@ function buildStandaloneHtml(
     language: string,
     markdown: string,
     options: HtmlExportOptions,
+    title: string,
     fontFamily?: string,
     renderFormat: 'markdown' | 'mixed' | 'textile' = 'markdown',
-    editorTheme: EditorTheme = 'dark'
+    editorTheme: EditorTheme = 'dark',
+    customCss = ''
 ): string {
     const safeCss = css.replace(/<\/style/gi, '<\\/style');
+    const safeCustomCss = customCss.replace(/<\/style/gi, '<\\/style');
     const safeFontFamily = fontFamilyForCss(fontFamily, DEFAULT_PDF_OPTIONS.fontFamily);
     const main = `<main class="mve-html">${body}</main>`;
     const content = options.showOutlineSidebar
         ? `<div class="mve-html-layout mve-html-layout-with-outline">${buildHtmlOutlineSidebar(markdown, language, renderFormat)}${buildHtmlOutlineResizer(language)}${buildHtmlOutlineShowButton(language)}${main}</div>`
         : main;
     const outlineResizeScript = options.showOutlineSidebar ? `<script>${HTML_OUTLINE_RESIZER_SCRIPT}</script>` : '';
-    return `<!doctype html><html lang="${escapeAttribute(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${safeCss}\n${HTML_CSS(safeFontFamily, editorTheme)}</style></head><body>${content}${outlineResizeScript}</body></html>`;
+    return `<!doctype html><html lang="${escapeAttribute(language)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title><style>${safeCss}\n${HTML_CSS(safeFontFamily, editorTheme)}${safeCustomCss ? `\n${safeCustomCss}` : ''}</style></head><body>${content}${outlineResizeScript}</body></html>`;
 }
 
 /** HTML出力用アウトラインの階層を保持する。 */
@@ -493,7 +558,10 @@ function buildHtmlOutlineShowButton(language: string): string {
  * @param outputPath - 書き換え後の相対リンクの基準となる生成HTMLの保存先パス。
  * @param documents - 現在のHTML出力に含まれるHtmlDocument一覧。リンク先Markdownの出力先解決に使う。
  * @param options - 画像を埋め込むか、リンク先MarkdownをHTML化するかを指定するHTML出力設定。
-
+ * @param language - セクションリンクの説明に使う表示言語。
+ * @param workspaceRoot - `/`で始まるリンクの基準ディレクトリ。
+ * @param imagePolicy - 読み込むローカル画像の方針と警告の通知先。
+ * @returns 参照を書き換えた本文HTML。
  */
 async function rewriteBody(
     html: string,
@@ -502,7 +570,8 @@ async function rewriteBody(
     documents: HtmlDocument[],
     options: HtmlExportOptions,
     language: string,
-    workspaceRoot: string
+    workspaceRoot: string,
+    imagePolicy: LocalImagePolicy
 ): Promise<string> {
     let result = stripUnsafeMarkup(html);
     const imageTags = [...result.matchAll(/<img\b[^>]*>/gi)].map(
@@ -513,7 +582,7 @@ async function rewriteBody(
          */
         (match) => match[0]);
     for (const tag of imageTags) {
-        const replacement = await rewriteImageTag(tag, sourcePath, outputPath, options);
+        const replacement = await rewriteImageTag(tag, sourcePath, outputPath, options, imagePolicy);
         result = result.replace(tag, replacement);
     }
     result = result.replace(/<a\b[^>]*>/gi,
@@ -821,13 +890,15 @@ function headingTextFromHtml(html: string): string {
  * @param sourcePath - 相対画像参照を解決するリンク元HTMLファイルのパス。
  * @param outputPath - 画像リンクの基準となる生成HTMLの保存先パス。
  * @param options - 画像を埋め込むか相対参照にするかを指定するHTML出力設定。
-
+ * @param policy - 埋め込むローカルファイルの方針と警告の通知先。相対参照では内容を読まないため場所を制限しない。
+ * @returns 書き換えたimg要素。埋め込めない場合は参照を変えず、内部用の属性だけを除く。
  */
 async function rewriteImageTag(
     tag: string,
     sourcePath: string,
     outputPath: string,
-    options: HtmlExportOptions
+    options: HtmlExportOptions,
+    policy: LocalImagePolicy
 ): Promise<string> {
     const original = decodeHtmlEntities(readAttribute(tag, 'data-original-src') ?? readAttribute(tag, 'src'));
     if (!original || isRemoteResource(original) || !sourcePath) return cleanDataAttributes(tag);
@@ -835,13 +906,21 @@ async function rewriteImageTag(
     if (!imagePath) return cleanDataAttributes(tag);
     let nextSource: string;
     if (options.embedImages) {
+        const rejection = await localImageRejection(imagePath, policy);
+        if (rejection) {
+            warnLocalFile(policy, original, rejection);
+            return cleanDataAttributes(tag);
+        }
         try {
             const bytes = await fs.readFile(imagePath);
             nextSource = `data:${mimeFromPath(imagePath)};base64,${bytes.toString('base64')}`;
         } catch {
+            warnLocalFile(policy, original, 'could not be read.');
             return cleanDataAttributes(tag);
         }
     } else {
+        // --strictで欠落画像を検出できるよう存在だけを確認する。参照は従来どおり出力する。
+        await warnIfLocalImageMissing(imagePath, original, policy);
         nextSource = relativeHref(outputPath, imagePath);
     }
     return replaceAttribute(cleanDataAttributes(tag), 'src', nextSource);
@@ -1044,15 +1123,6 @@ function isRemoteResource(value: string): boolean {
  */
 function isMarkdownPath(value: string): boolean {
     return /\.(?:md|markdown|textile)$/i.test(value);
-}
-
-/**
- * HTML出力文書の拡張子に合う専用描画形式を選ぶ。
- * @param value - MarkdownまたはTextile文書のファイルパス。
- * @returns Textile専用拡張子ではTextile形式、それ以外ではMarkdown形式。
- */
-function getHtmlRenderFormat(value: string): 'mixed' | 'textile' {
-    return /\.textile$/i.test(value) ? 'textile' : 'mixed';
 }
 
 /**

@@ -151,15 +151,60 @@ export interface PdfOptions {
     paragraphSpacing?: number;
 
     /**
+     * PDFヘッダーの文字揃え。省略時は左揃え。
+     */
+    headerAlign?: PdfTextAlign;
+
+    /**
+     * PDFフッターの文字揃え。省略時は中央揃え。
+     */
+    footerAlign?: PdfTextAlign;
+
+    /**
+     * PDFヘッダー・フッターの文字サイズ（pt）。省略時は6pt（従来の8pxと同じ大きさ）。
+     */
+    headerFooterFontSize?: number;
+
+    /**
+     * PDFヘッダー・フッターの左右の余白（mm）。本文の余白とは独立している。省略時は15mm。
+     */
+    headerFooterPadding?: number;
+
+    /**
      * 出力を保存ダイアログなしで確定する設定。
      */
     saveWithoutDialog: boolean;
 }
 
 /**
+ * PDFヘッダー・フッターの文字揃え。
+ */
+export type PdfTextAlign = 'left' | 'center' | 'right';
+
+/**
  * 共有プロトコルへ渡す設定項目と既定値のデータ形状。
  */
-export type NormalizedPdfOptions = Omit<PdfOptions, 'fontFamily' | 'bodyFontSize' | 'headingFontSizes' | 'codeFontSize' | 'lineHeight' | 'paragraphSpacing'> & {
+export type NormalizedPdfOptions = Omit<PdfOptions, 'fontFamily' | 'bodyFontSize' | 'headingFontSizes' | 'codeFontSize' | 'lineHeight' | 'paragraphSpacing' | 'headerAlign' | 'footerAlign' | 'headerFooterFontSize' | 'headerFooterPadding'> & {
+
+    /**
+     * PDFヘッダーの文字揃え。
+     */
+    headerAlign: PdfTextAlign;
+
+    /**
+     * PDFフッターの文字揃え。
+     */
+    footerAlign: PdfTextAlign;
+
+    /**
+     * PDFヘッダー・フッターの文字サイズ（pt）。
+     */
+    headerFooterFontSize: number;
+
+    /**
+     * PDFヘッダー・フッターの左右の余白（mm）。
+     */
+    headerFooterPadding: number;
 
     /**
      * PDF本文に適用するフォント指定。
@@ -266,6 +311,10 @@ export const DEFAULT_PDF_OPTIONS: NormalizedPdfOptions = {
     codeFontSize: 9,
     lineHeight: 1.6,
     paragraphSpacing: 6,
+    headerAlign: 'left',
+    footerAlign: 'center',
+    headerFooterFontSize: 6,
+    headerFooterPadding: 15,
     textReplacements: [],
     saveWithoutDialog: true
 };
@@ -273,7 +322,7 @@ export const DEFAULT_PDF_OPTIONS: NormalizedPdfOptions = {
 /**
  * PDF設定候補を既定値へ補完し、数値を出力で許可する範囲へ収める。
  * @param value - 用紙、余白、文字組版などを含むPDF設定候補。
- * @returns 用紙と向きの有効値、余白0〜50mm、本文6〜48pt、見出し6〜72pt、コード6〜36pt、行間0.8〜3、段落間隔0〜48ptへ収めた設定。形式不正の置換ルールは除き、正規表現の妥当性は別途検証する。
+ * @returns 用紙と向きの有効値、余白0〜50mm、本文6〜48pt、見出し6〜72pt、コード6〜36pt、行間0.8〜3、段落間隔0〜48pt、ヘッダー・フッターの文字4〜24pt・左右余白0〜50mmへ収めた設定。形式不正の置換ルールは除き、正規表現の妥当性は別途検証する。
  */
 export function normalizePdfOptions(value: unknown): NormalizedPdfOptions {
     const candidate = value && typeof value === 'object' ? value as Partial<PdfOptions> : {};
@@ -351,6 +400,12 @@ export function normalizePdfOptions(value: unknown): NormalizedPdfOptions {
         codeFontSize: numberInRange(candidate.codeFontSize, DEFAULT_PDF_OPTIONS.codeFontSize, 6, 36),
         lineHeight: numberInRange(candidate.lineHeight, DEFAULT_PDF_OPTIONS.lineHeight, 0.8, 3),
         paragraphSpacing: numberInRange(candidate.paragraphSpacing, DEFAULT_PDF_OPTIONS.paragraphSpacing, 0, 48),
+        headerAlign: candidate.headerAlign === 'center' || candidate.headerAlign === 'right'
+            ? candidate.headerAlign : DEFAULT_PDF_OPTIONS.headerAlign,
+        footerAlign: candidate.footerAlign === 'left' || candidate.footerAlign === 'right'
+            ? candidate.footerAlign : DEFAULT_PDF_OPTIONS.footerAlign,
+        headerFooterFontSize: numberInRange(candidate.headerFooterFontSize, DEFAULT_PDF_OPTIONS.headerFooterFontSize, 4, 24),
+        headerFooterPadding: numberInRange(candidate.headerFooterPadding, DEFAULT_PDF_OPTIONS.headerFooterPadding, 0, 50),
         saveWithoutDialog: typeof candidate.saveWithoutDialog === 'boolean'
             ? candidate.saveWithoutDialog
             : DEFAULT_PDF_OPTIONS.saveWithoutDialog

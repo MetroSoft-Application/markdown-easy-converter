@@ -70,7 +70,7 @@ function getFrontMatter(markdown: string): string | undefined {
  * @param markdown - front matterを探すMarkdown本文。
  * @returns YAML本文、元の本文、BOM、本文開始位置。区切りが不正ならundefined。
  */
-function getFrontMatterRange(markdown: string): {
+export function getFrontMatterRange(markdown: string): {
   prefix: string;
   source: string;
   yaml: string;
