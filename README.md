@@ -60,6 +60,10 @@ PDF output:
 
 ![PDF output of the sample document](examples/images/sample-pdf.png)
 
+DOCX output, opened in a word processor:
+
+![DOCX output of the sample document](examples/images/sample-docx.png)
+
 ## Options
 
 | Option | Description | Default |
