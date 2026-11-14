@@ -32,6 +32,7 @@
     "dist/pele-render-worker.js",
     "dist/markdown-fallback.js",
     "dist/output-replacements.js",
+    "dist/docx-extract.js",
     "dist/third-party-licenses/**",
     "browsers.json"
   ],
@@ -59,7 +60,7 @@
     "build": "node build.mjs",
     "prepack": "npm run build",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/cli.test.mjs test/print-assets.test.mjs",
+    "test": "npm run build && node --test test/cli.test.mjs test/print-assets.test.mjs test/docx.test.mjs",
     "test:package": "node scripts/package-smoke.mjs"
   }
 }

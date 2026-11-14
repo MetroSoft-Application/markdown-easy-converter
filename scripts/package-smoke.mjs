@@ -83,7 +83,7 @@ function inspectPack(pack, metadata) {
   for (const required of [
     'package.json', 'README.md', 'LICENSE.md', 'browsers.json',
     'dist/mve-convert.cjs', 'dist/print-assets.css', 'dist/pele-render-worker.js',
-    'dist/markdown-fallback.js', 'dist/output-replacements.js',
+    'dist/markdown-fallback.js', 'dist/output-replacements.js', 'dist/docx-extract.js',
     'dist/third-party-licenses/README.md',
   ]) assert.ok(files.has(required), `missing package file: ${required}`);
   assert.ok([...files].some((file) => file.includes('/playwright-core@') && /LICENSE/i.test(file)),

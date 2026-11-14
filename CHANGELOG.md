@@ -16,3 +16,8 @@
 
 - Adds batch conversion, stdin/stdout, custom CSS, `--strict`, and `--json`.
 - Fixes document titles, rendered front matter, and embedding of non-image files.
+
+## 0.2.0
+
+- Adds `--format docx` for editable Word documents with native equations.
+- Fixes `--force` reruns wrongly refused on ReFS volumes.

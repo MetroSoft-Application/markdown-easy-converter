@@ -214,6 +214,24 @@ test('a UTF-8 BOM in the configuration file is accepted', async () => {
   });
 });
 
+/**
+ * 既存の出力がある --out-dir へ、--force で同じ一括変換をやり直せることを検証する。
+ * 回帰リスク: ReFS などファイルIDが2^53を超えるファイルシステムで、stat の ino が数値の精度で丸められ、
+ * 別の入力と既存の出力が同じファイルと誤判定されて「Output must differ from input」で止まること。
+ * 一時フォルダ（TMP）が ReFS 上にあるときだけ再現するため、ReFS で確認するときは TMP を ReFS のフォルダへ向けて実行する。
+ */
+test('force reruns a batch into an existing output directory', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    for (let index = 0; index < 5; index += 1) await writeFile(path.join(directory, `batch${index}.md`), `# Doc ${index}\n`);
+    const out = path.join(directory, 'out');
+    const args = [cli, 'batch*.md', '--format', 'html', '--out-dir', out, '--force', '--browser', browserPath];
+    await execute(process.execPath, args, { cwd: directory });
+    const rerun = await execute(process.execPath, args, { cwd: directory });
+    assert.equal(rerun.stdout.trim().split(/\r?\n/).length, 5);
+    assert.match(await readFile(path.join(out, 'batch4.html'), 'utf8'), /Doc 4/);
+  });
+});
+
 /** `--force` でも原文のハードリンク別名は入力として保護する。 */
 test('force refuses an output hard link to the input', async () => {
   await withDirectory(async (directory) => {
@@ -942,8 +960,12 @@ test('--format can be inferred from the output extension only', async () => {
   assert.equal(parseArguments(['a.md', '-o', 'a.PDF']).format, 'pdf');
   assert.equal(parseArguments(['a.md', '-o', 'a.htm']).format, 'html');
   assert.equal(parseArguments(['a.md', '-o', 'a.pdf', '--format', 'html']).format, 'html');
-  assert.throws(() => parseArguments(['a.md']), /--format html\|pdf is required/);
-  assert.throws(() => parseArguments(['a.md', '-o', 'a.txt']), /--format html\|pdf is required/);
+  assert.equal(parseArguments(['a.md', '-o', 'a.DOCX']).format, 'docx');
+  assert.equal(parseArguments(['a.md', '-o', 'a.docx', '--format', 'pdf']).format, 'pdf');
+  assert.throws(() => parseArguments(['a.md']), /--format html\|pdf\|docx is required/);
+  assert.throws(() => parseArguments(['a.md', '-o', 'a.txt']), /--format html\|pdf\|docx is required/);
+  // .doc は旧形式で出力できないため、DOCXと推定しない。
+  assert.throws(() => parseArguments(['a.md', '-o', 'a.doc']), /--format html\|pdf\|docx is required/);
 });
 
 /**

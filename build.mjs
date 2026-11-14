@@ -87,6 +87,22 @@ buildResults.push(await esbuild.build({
   metafile: true,
   logLevel: 'info'
 }));
+/**
+ * DOCX出力の抽出スクリプト。印刷用HTMLを読み込んだページで、JavaScript無効のまま page.evaluate に文字列で渡すため、
+ * 外部参照のないIIFEとして束ねる。グローバル名 mveDocxExtract を src/docx/render.ts が呼び出す。
+ */
+buildResults.push(await esbuild.build({
+  entryPoints: [path.join(srcdir, 'docx', 'extract.ts')],
+  outfile: path.join(outdir, 'docx-extract.js'),
+  bundle: true,
+  platform: 'browser',
+  format: 'iife',
+  target: ['chrome120'],
+  minify: true,
+  globalName: 'mveDocxExtract',
+  metafile: true,
+  logLevel: 'info'
+}));
 await chmod(path.join(outdir, 'mve-convert.cjs'), 0o755);
 await writeThirdPartyLicenses(buildResults.flatMap((result) => Object.keys(result.metafile.inputs)));
 console.log('CLI built: dist/mve-convert.cjs');

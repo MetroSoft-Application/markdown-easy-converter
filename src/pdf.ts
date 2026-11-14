@@ -2,7 +2,7 @@
  * @fileoverview 独立CLIが所有するPDF出力処理。描画済みHTMLを設定に従って印刷し、ブラウザー資源を解放する。
  */
 import { fileURLToPath } from 'node:url';
-import type { Browser, BrowserContext } from 'playwright-core';
+import type { Browser, BrowserContext, Route } from 'playwright-core';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
@@ -208,30 +208,7 @@ export async function renderPdfWithProfile(
         await withRenderControl(
 
 
-            () => page.route('**/*',
-                /**
-                 * PDF読込中の外部画像要求を有限時間で完了させる。
-                 * @param route - 継続、取得、応答を制御するPlaywright Route。
-                 * @returns route処理のPromise。HTTP画像だけ有限時間取得し、失敗時はその要求を中断する。
-                 */
-                async (route) => {
-                    const resource = route.request();
-                    if (resource.resourceType() !== 'image' || !/^https?:/i.test(resource.url())) {
-                        await route.continue();
-                        return;
-                    }
-                    try {
-                        const response = await route.fetch({ timeout: assetTimeoutMs });
-                        await route.fulfill({ response });
-                    } catch {
-                        // 応答しないリモート画像はPDF全体を止めず、欠損画像として扱う。
-                        await route.abort('timedout').catch(
-                            /**
-                            * タイムアウト後のルート中断失敗を無視して後続の後始末を行う。
-                             */
-                            () => undefined);
-                    }
-                }),
+            () => page.route('**/*', limitRemoteImageRequests(assetTimeoutMs)),
             request.signal,
             deadlineAt,
             'route setup',
@@ -323,26 +300,56 @@ export async function renderPdfWithProfile(
 }
 
 /**
- * PDF描画処理をキャンセルと期限で制御し、遅れて完了した処理の資源も解放する。
+ * 印刷用ページの外部画像要求を有限時間で完了させるルート処理を作る。PDFとDOCXの描画で共有する。
+ * @param assetTimeoutMs - 各リモート画像の取得を待つ時間（ミリ秒）。
+ * @returns `page.route('**\/*', ...)`へ渡す処理。HTTP(S)の画像だけ有限時間取得し、失敗時はその要求を中断する。
+ *   画像以外とHTTP(S)以外の要求はそのまま継続する。
+ */
+export function limitRemoteImageRequests(assetTimeoutMs: number): (route: Route) => Promise<void> {
+    return async (route) => {
+        const resource = route.request();
+        if (resource.resourceType() !== 'image' || !/^https?:/i.test(resource.url())) {
+            await route.continue();
+            return;
+        }
+        try {
+            const response = await route.fetch({ timeout: assetTimeoutMs });
+            await route.fulfill({ response });
+        } catch {
+            // 応答しないリモート画像は出力全体を止めず、欠損画像として扱う。
+            await route.abort('timedout').catch(
+                /**
+                * タイムアウト後のルート中断失敗を無視して後続の後始末を行う。
+                 */
+                () => undefined);
+        }
+    };
+}
+
+/**
+ * 描画処理をキャンセルと期限で制御し、遅れて完了した処理の資源も解放する。
+ * PDFとDOCXの描画で同じ期限・キャンセルの規則を使うため公開する。
  * @param operationFactory - 各制御区間で実行する非同期処理を開始する関数。
  * @param signal - 呼び出し側のキャンセルを通知するAbortSignal。
  * @param deadlineAt - 処理全体の期限を表すUnix時刻のミリ秒値。
  * @param stage - 期限切れエラーと診断ログに含める処理段階名。
  * @param onCancel - 中断時に実行する任意の後始末処理。
  * @param lateCleanup - 中断後に処理が完了した場合、その結果が保持する資源を解放する処理。
+ * @param outputName - エラー文言に入れる出力形式名。省略時は従来どおり`PDF`。
  * @returns 期限内に完了したoperationの結果。キャンセルまたは期限切れ時は拒否する。
  */
-async function withRenderControl<T>(
+export async function withRenderControl<T>(
     operationFactory: () => Promise<T>,
     signal: AbortSignal | undefined,
     deadlineAt: number,
     stage: string,
     onCancel?: () => void,
-    lateCleanup?: (value: T) => void
+    lateCleanup?: (value: T) => void,
+    outputName = 'PDF'
 ): Promise<T> {
-    if (signal?.aborted) throw new Error('PDF rendering was canceled.');
+    if (signal?.aborted) throw new Error(`${outputName} rendering was canceled.`);
     const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) throw new Error(`PDF ${stage} timed out.`);
+    if (remainingMs <= 0) throw new Error(`${outputName} ${stage} timed out.`);
 
     const operation = Promise.resolve().then(operationFactory);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -383,12 +390,12 @@ async function withRenderControl<T>(
          */
         () => {
             // 同じ文言の例外を呼び出し元が表示するため、CLI の標準エラーへ重複した警告は出さない。
-            cancel(new Error(`PDF ${stage} timed out.`));
+            cancel(new Error(`${outputName} ${stage} timed out.`));
         }, remainingMs);
     if (signal) {
         abortHandler =
 
-            () => cancel(new Error('PDF rendering was canceled.'));
+            () => cancel(new Error(`${outputName} rendering was canceled.`));
         signal.addEventListener('abort', abortHandler, { once: true });
     }
     try {
@@ -408,7 +415,7 @@ async function withRenderControl<T>(
  * PlaywrightのPDF用ブラウザーコンテキストを閉じ、終了または上限時間まで待つ。
  * @param context - 閉じるPDF用Playwright BrowserContext。
  */
-async function closePdfContext(context: BrowserContext): Promise<void> {
+export async function closePdfContext(context: BrowserContext): Promise<void> {
     const close = context.close().catch(
         /**
         * コンテキストの終了失敗を無視し、終了待ちの上限時間を適用する。
@@ -834,24 +841,29 @@ function pdfPaperOptions(
 }
 
 /**
+ * 各用紙サイズの縦向きの寸法（mm）。PDFの印刷本文幅とDOCXのページ設定で共有し、両者の用紙を一致させる。
+ * B列はJIS B（B4: 257×364mm、B5: 182×257mm）で、Letterは扱わない。
+ */
+export const PAPER_DIMENSIONS_MM: Readonly<Record<PdfPaperFormat, { readonly width: number; readonly height: number }>> = {
+    A0: { width: 841, height: 1189 },
+    A1: { width: 594, height: 841 },
+    A2: { width: 420, height: 594 },
+    A3: { width: 297, height: 420 },
+    A4: { width: 210, height: 297 },
+    A5: { width: 148, height: 210 },
+    A6: { width: 105, height: 148 },
+    B4: { width: 257, height: 364 },
+    B5: { width: 182, height: 257 }
+};
+
+/**
  * PDF出力のビューポートを用紙寸法と余白から計算する。
  * Chromiumの既定画面幅に依存せず、出力設定どおりの印刷本文領域を組版する。
  * @param options - 用紙、向き、余白を含む正規化済みPDF設定。
  * @returns CSSピクセル単位に丸めた本文幅と本文高さ。
  */
-function pdfPrintViewport(options: NormalizedPdfOptions): { width: number; height: number } {
-    const paperDimensionsMm: Record<PdfPaperFormat, { width: number; height: number }> = {
-        A0: { width: 841, height: 1189 },
-        A1: { width: 594, height: 841 },
-        A2: { width: 420, height: 594 },
-        A3: { width: 297, height: 420 },
-        A4: { width: 210, height: 297 },
-        A5: { width: 148, height: 210 },
-        A6: { width: 105, height: 148 },
-        B4: { width: 257, height: 364 },
-        B5: { width: 182, height: 257 }
-    };
-    const portraitDimensions = paperDimensionsMm[options.format];
+export function pdfPrintViewport(options: NormalizedPdfOptions): { width: number; height: number } {
+    const portraitDimensions = PAPER_DIMENSIONS_MM[options.format];
     const pageWidthMm = options.orientation === 'landscape' ? portraitDimensions.height : portraitDimensions.width;
     const pageHeightMm = options.orientation === 'landscape' ? portraitDimensions.width : portraitDimensions.height;
     const cssPixelsPerMillimeter = 96 / 25.4;

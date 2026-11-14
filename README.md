@@ -1,14 +1,15 @@
 # Markdown Easy Convert
 
-`mve-convert` is a command-line tool that converts Markdown and Textile documents to HTML or PDF. The input document is never modified.
+`mve-convert` is a command-line tool that converts Markdown and Textile documents to HTML, PDF, or Word (DOCX). The input document is never modified.
 
 - Headings, lists, task lists, tables, footnotes, and a `[toc]` table of contents
 - Syntax-highlighted code blocks
 - Math with KaTeX (`$...$` and `$$...$$`)
 - Mermaid diagrams rendered to SVG; in regular documents and Marp slide decks, a diagram that cannot be rendered (for example, a syntax error) is replaced by an error message, the rest of the document is still exported, and a warning is written to stderr (exit code 0)
-- Marp slide decks (PDF output only; HTML output renders the slide source as a regular document)
+- Marp slide decks (PDF output only; HTML and DOCX output render the slide source as a regular document)
 - HTML with an optional heading outline sidebar, embedded images, and recursive conversion of linked documents
 - PDF paper sizes `A0`–`A6`, `B4`, and `B5`, with configurable margins, fonts, headers, and footers
+- Editable DOCX with Word headings, lists, tables, footnotes, and equations, using the PDF page settings (see [DOCX output](#docx-output))
 
 ## Requirements
 
@@ -36,7 +37,10 @@ mve-convert document.md --format pdf
 # Chooses the output path and overwrites an existing file
 mve-convert document.md --format pdf -o out/document.pdf --force
 
-# --format can be omitted when -o ends in .html, .htm, or .pdf
+# Writes document.docx next to document.md
+mve-convert document.md --format docx
+
+# --format can be omitted when -o ends in .html, .htm, .pdf, or .docx
 mve-convert document.md -o out/document.pdf
 
 # Converts many documents with one browser, keeping their relative locations
@@ -60,18 +64,18 @@ PDF output:
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `--format html\|pdf` | Output format. Required unless `-o` ends in `.html`, `.htm`, or `.pdf`. | — |
-| `-o, --output PATH` | Output file path. Missing directories are created. `-` writes to standard output. | Input path with `.html` or `.pdf` |
+| `--format html\|pdf\|docx` | Output format. Required unless `-o` ends in `.html`, `.htm`, `.pdf`, or `.docx`. | — |
+| `-o, --output PATH` | Output file path. Missing directories are created. `-` writes to standard output. | Input path with `.html`, `.pdf`, or `.docx` |
 | `--out-dir PATH` | Output directory. Inputs keep their locations relative to their common parent directory. Cannot be combined with `-o`. | — |
 | `--base-dir PATH` | Base directory for relative links when reading standard input. | Current directory |
 | `--title TEXT` | Document title. Applies to a single input. | See [Document title and front matter](#document-title-and-front-matter) |
-| `--css PATH` | CSS file added after the built-in styles, for HTML and PDF. Can be repeated, and replaces `rendering.css`. The file is inlined, so relative `url()` references are not resolved from its location; use `data:` or absolute `https:` URLs. | — |
+| `--css PATH` | CSS file added after the built-in styles, for HTML, PDF, and DOCX. Can be repeated, and replaces `rendering.css`. The file is inlined, so relative `url()` references are not resolved from its location; use `data:` or absolute `https:` URLs. | — |
 | `--strict` | Exit with code 1 when any warning is reported. Output files are still written. | Off |
 | `--json` | Write the result to standard output as JSON. See [Scripting](#scripting). | Off |
 | `--restrict-local-files` | Do not read images or linked documents outside the workspace root. | Off |
 | `--front-matter auto\|render` | `auto` removes YAML front matter from the output. `render` keeps it in the document. | `auto` |
 | `--browser-timeout SEC` | Browser startup timeout in seconds, up to 3600. | `5` |
-| `--render-timeout SEC` | PDF generation timeout in seconds, up to 3600. | `60` |
+| `--render-timeout SEC` | PDF and DOCX generation timeout in seconds, up to 3600. | `60` |
 | `--config PATH` | JSON configuration file. See [Configuration file](#configuration-file). | — |
 | `--force` | Overwrite existing output files. | Off |
 | `--browser PATH` | Browser executable used for rendering. | Edge, then Chrome |
@@ -86,7 +90,7 @@ PDF output:
 | `-h, --help` | Show usage. | — |
 | `--version` | Show the package version. | — |
 
-Options that start with `--html-` apply only to HTML output; combining them with `--format pdf` is an error. Command-line options take precedence over the configuration file.
+Options that start with `--html-` apply only to HTML output; combining them with `--format pdf` or `--format docx` is an error. Command-line options take precedence over the configuration file.
 
 ### Converting linked documents
 
@@ -107,15 +111,25 @@ With `--out-dir`, locations are relative to the part of each pattern before the 
 - If two inputs would write the same output file, nothing is written.
 - `-o`, `--title`, standard output, and `--html-linked` work with a single input only.
 
+## DOCX output
+
+`--format docx` writes a Word document that can be edited in Microsoft Word. It is built from the same rendering as PDF output, so the `pdf` settings and `--css` apply to it as well:
+
+- Paper size, orientation, margins, font sizes, line height, paragraph spacing, and the header and footer come from the `pdf` settings. `{page}` and `{pages}` become Word page number fields.
+- Headings use the Word heading styles and appear in the navigation pane. Lists, tables, footnotes, links to headings, and `[toc]` become Word lists, tables, footnotes, bookmarks, and a table of contents field. Update the field in Word to add page numbers.
+- Math becomes editable Word equations. An expression that cannot be converted is embedded as an image, and a warning is written to stderr (exit code 0).
+- PNG, JPEG, GIF, and BMP images are embedded as they are. Mermaid diagrams, remote images, and other image formats (SVG, WebP, AVIF, ICO) are embedded as PNG images of their rendering.
+- Fonts are referenced by name and are not embedded. Install the fonts that the document uses, or set `pdf.fontFamily`, to get the same look on another computer.
+
 ## Document title and front matter
 
 A YAML front matter block at the start of a Markdown document is not written to the output. A leading block between `---` lines is treated as front matter only when it parses as a YAML mapping (`key: value`); anything else stays in the document. In `.textile` files, only a block with `marp: true` is removed. To keep the block in the output as in earlier versions, set `rendering.frontMatter` to `render`.
 
-The HTML `<title>` and the PDF document title come from `--title`, then the front matter `title`, then the first level-1 heading, then the file name. `textReplacements` also apply to the title.
+The HTML `<title>` and the PDF and DOCX document titles come from `--title`, then the front matter `title`, then the first level-1 heading, then the file name. `textReplacements` also apply to the title.
 
 ## Local images
 
-`--html-embed-images` and PDF output embed a local file only when its content is an image, whatever its name: PNG, JPEG, GIF, WebP, BMP, ICO, or AVIF, or, for files named `.svg`, a document whose first element is `svg`. Other files are not embedded, and a warning is written to stderr (exit code 0).
+`--html-embed-images`, PDF output, and DOCX output embed a local file only when its content is an image, whatever its name: PNG, JPEG, GIF, WebP, BMP, ICO, or AVIF, or, for files named `.svg`, a document whose first element is `svg`. Other files are not embedded, and a warning is written to stderr (exit code 0).
 
 Directories are not restricted by default. Use `--restrict-local-files` when converting untrusted documents; it limits images and `--html-linked` documents to `--workspace-root` (the input directory by default), and on Windows it refuses network paths without connecting to them. Without `--html-embed-images`, HTML output only references images: it checks that a local image exists so that a missing one can be reported, and it does not read the image or check network paths.
 
@@ -202,7 +216,7 @@ mve-convert document.md --format pdf --config export.json
 
 ### `pdf`
 
-Out-of-range numbers are clamped to the listed range.
+These settings also apply to DOCX output. Out-of-range numbers are clamped to the listed range.
 
 | Key | Description | Default |
 | --- | --- | --- |

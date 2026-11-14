@@ -1,6 +1,7 @@
 /**
- * @fileoverview MarkdownからHTML/PDFを出力するCLIのエントリポイント。
- * 引数と設定ファイルを検証し、HTML (src/html.ts) / PDF (src/pdf.ts) の出力処理を呼び出して、ブラウザー資源を解放する。
+ * @fileoverview MarkdownからHTML/PDF/DOCXを出力するCLIのエントリポイント。
+ * 引数と設定ファイルを検証し、HTML (src/html.ts) / PDF (src/pdf.ts) / DOCX (src/docx/render.ts) の出力処理を呼び出して、
+ * ブラウザー資源を解放する。
  */
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
@@ -9,6 +10,7 @@ import { parse as parseYaml } from 'yaml';
 import type { BrowserContext, Page } from 'playwright-core';
 import { ensureHtmlExtension, prepareHtmlExport, stripUtf8Bom, writePreparedHtml } from './html';
 import { acquirePdfBrowser, closePdfBrowser, PdfBrowserUnavailableError, renderPdf, template } from './pdf';
+import { renderDocx } from './docx/render';
 import { closePeleRenderer, MermaidDiagramError, renderPeleMermaid } from './runtime/peleMermaid';
 import { MAX_IMAGE_COUNT, MAX_MERMAID_IMAGE_BYTES, resolveMermaidImageSources } from './runtime/mermaidImages';
 import { namespaceMermaidSvg } from './shared/mermaidSvg';
@@ -33,9 +35,9 @@ export { PdfBrowserUnavailableError };
 /** PDF本文の圧縮によりヘッダーの文字列を生成物から検証できないため、テスト用にテンプレート生成を再公開する。 */
 export { template as headerFooterTemplate };
 
-/** ファイル入力型CLIが受け付ける出力形式。 */
-export type OutputFormat = 'html' | 'pdf';
-/** HTML/PDF出力で使用できる見出しテーマ。 */
+/** ファイル入力型CLIが受け付ける出力形式。拡張子もこの値（`.html`・`.pdf`・`.docx`）になる。 */
+export type OutputFormat = 'html' | 'pdf' | 'docx';
+/** HTML/PDF/DOCX出力で使用できる見出しテーマ。 */
 type Theme = 'dark' | 'light';
 /** 変換処理が受け取る正規化済みのCLI引数。 */
 export interface Arguments {
@@ -97,12 +99,12 @@ export interface Arguments {
 /** CLIバンドル用に複製したレンダラーと印刷素材を格納するディレクトリ。 */
 const assetDir = __dirname;
 /** 受け付けるコマンドラインオプションと対応させるヘルプ文。 */
-const usage = `Usage: mve-convert INPUT.md --format html|pdf [-o OUTPUT]
-       mve-convert INPUT.md "docs/**/*.md" --format html|pdf --out-dir DIR
-       mve-convert - --format html|pdf [-o OUTPUT] < INPUT.md
+const usage = `Usage: mve-convert INPUT.md --format html|pdf|docx [-o OUTPUT]
+       mve-convert INPUT.md "docs/**/*.md" --format html|pdf|docx --out-dir DIR
+       mve-convert - --format html|pdf|docx [-o OUTPUT] < INPUT.md
   INPUT                   File, wildcard pattern (*, ?, **), or - for stdin
-  --format html|pdf       Output format; optional when -o ends in .html, .htm, or .pdf
-  -o, --output PATH       Output file (default: INPUT.html or INPUT.pdf); - for stdout
+  --format html|pdf|docx  Output format; optional when -o ends in .html, .htm, .pdf, or .docx
+  -o, --output PATH       Output file (default: INPUT.html, .pdf, or .docx); - for stdout
   --out-dir PATH          Output directory for one or more inputs
   --base-dir PATH         Base directory for relative links when reading stdin
   --title TEXT            Document title (single input)
@@ -112,7 +114,7 @@ const usage = `Usage: mve-convert INPUT.md --format html|pdf [-o OUTPUT]
   --restrict-local-files  Do not read local files outside the workspace root
   --front-matter MODE     auto removes YAML front matter, render keeps it (default: auto)
   --browser-timeout SEC   Browser startup timeout (default: 5)
-  --render-timeout SEC    PDF generation timeout (default: 60)
+  --render-timeout SEC    PDF/DOCX generation timeout (default: 60)
   --config PATH           JSON export settings
   --force                 Overwrite existing output files
   --html-embed-images     Embed local images in HTML
@@ -227,7 +229,7 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
                 renderTimeoutMs = parseTimeoutSeconds('render timeout', value);
                 break;
             case '--format':
-                if (value !== 'html' && value !== 'pdf') throw new Error('Invalid format: ' + value);
+                if (value !== 'html' && value !== 'pdf' && value !== 'docx') throw new Error('Invalid format: ' + value);
                 format = value;
                 break;
             case '--config':
@@ -262,9 +264,10 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
         const extension = path.extname(output).toLowerCase();
         if (extension === '.html' || extension === '.htm') format = 'html';
         else if (extension === '.pdf') format = 'pdf';
+        else if (extension === '.docx') format = 'docx';
     }
-    if (!format) throw new Error('--format html|pdf is required.');
-    if (format === 'pdf' && (linked || outline || argv.includes('--html-embed-images') || argv.includes('--html-no-embed-images'))) {
+    if (!format) throw new Error('--format html|pdf|docx is required.');
+    if (format !== 'html' && (linked || outline || argv.includes('--html-embed-images') || argv.includes('--html-no-embed-images'))) {
         throw new Error('--html-embed-images, --html-no-embed-images, --html-linked, and --html-outline are HTML-only options.');
     }
     if (output && outDir) throw new Error('Invalid output: --output and --out-dir cannot be combined.');
@@ -698,7 +701,7 @@ async function readFirstHeading(page: Page, html: string): Promise<string | unde
  * @param page - Markdownの描画にも使用したブラウザーページ。
  * @param html - 描画済み本文。
  * @param options - PDFとHTMLで共有する置換設定。
- * @param format - PDFの場合だけヘッダーとフッターを対象にする。
+ * @param format - ページを持つ形式（PDF・DOCX）の場合だけヘッダーとフッターを対象にする。
  * @param title - 置換前の文書タイトル。
  * @returns 置換済みの本文、設定、タイトル。置換ルールがなければ入力をそのまま返す。
  */
@@ -719,10 +722,10 @@ async function replaceOutput(
         return replacement.replaceOutputHtml(markup, rules, header, footer, title);
     }, {
         markup: html, rules: options.textReplacements, title,
-        header: format === 'pdf' ? options.header : '', footer: format === 'pdf' ? options.footer : ''
+        header: format !== 'html' ? options.header : '', footer: format !== 'html' ? options.footer : ''
     });
     return {
-        html: result.html, title: result.title, options: format === 'pdf'
+        html: result.html, title: result.title, options: format !== 'html'
             ? { ...options, header: result.header, footer: result.footer } : options
     };
 }
@@ -761,8 +764,12 @@ async function assertDistinctFiles(sources: readonly string[], outputs: readonly
         return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
     };
     const sourcePaths = new Set(sources.map(normalized));
+    // ファイルの同一性は dev と ino をBigIntで比べる。ReFSなどのファイルIDは2^53を超え、
+    // 通常の数値では丸められて別のファイルが同じIDになり、上書き保護が誤って止まるため。
+    // なお Windows の Node（libuv）が返す ino は64ビットの IndexNumber で、ReFS本来の128ビットIDの一部のため、
+    // 一意性は完全には保証されない。誤判定は「書き込まない」側に倒れ、データを壊す方向には働かない。
     const sourceFiles = await Promise.all(sources.map(async (source) => ({
-        stat: await fs.stat(source).catch((error: NodeJS.ErrnoException) => {
+        stat: await fs.stat(source, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
             if (error.code === 'ENOENT') return undefined;
             throw error;
         }),
@@ -778,7 +785,7 @@ async function assertDistinctFiles(sources: readonly string[], outputs: readonly
         if (outputPaths.has(outputPath)) throw new Error(`Output paths must be distinct: ${output}`);
         outputPaths.add(outputPath);
         if (sourcePaths.has(normalized(output))) throw new Error(`Output must differ from input: ${output}`);
-        const target = await fs.stat(output).catch((error: NodeJS.ErrnoException) => {
+        const target = await fs.stat(output, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
             if (error.code === 'ENOENT') return undefined;
             throw error;
         });
@@ -821,7 +828,7 @@ function plannedOutput(args: Pick<Arguments, 'input' | 'output' | 'format'>): st
 /**
  * 標準出力へ書き込み、バッファへの受け渡しの完了を待つ。
  * 読み手が先に閉じた場合（`| head`のEPIPE）の失敗は書き込みのコールバックで受け取り、終了コード1として報告する。
- * @param data - 出力するHTML文字列またはPDFのバイト列。
+ * @param data - 出力するHTML文字列、またはPDF・DOCXのバイト列。
  * @throws 書き込みに失敗した場合。
  */
 async function writeStdout(data: string | Buffer): Promise<void> {
@@ -834,7 +841,8 @@ async function writeStdout(data: string | Buffer): Promise<void> {
 }
 
 /**
- * 1件の原文を描画し、HTML/PDFの保存と共有資源の解放を完了する。
+ * 1件の原文を描画し、HTML/PDF/DOCXの保存と共有資源の解放を完了する。
+ * DOCXはPDFと同じ本文・印刷CSS・ページ設定から作り、Marpのスライドは通常の文書として出力する（HTMLと同じ）。
  * @param args - 検証済みの変換要求。
  * @returns 書き込み済みの出力パス。標準出力へ書いた場合は空。
  */
@@ -894,6 +902,34 @@ async function convertExclusive(args: Arguments): Promise<readonly string[]> {
         const fontFamily = args.fontFamily ?? DEFAULT_FONT_FAMILY_STACK;
         const css = (marpContent?.css ? marpContent.css + '\n' : '') + printContentCss(fontFamily) + '\n'
             + await fs.readFile(path.join(assetDir, 'print-assets.css'), 'utf8');
+        if (args.format === 'docx') {
+            // DOCXは印刷CSSで組版した結果から書式を読むため、利用者のCSSも同じく適用する（色・揃え・表示/非表示に反映される）。
+            const result = await renderDocx({
+                html, css,
+                title: replaced.title,
+                documentPath: args.input,
+                browserPath: args.browserPath,
+                options: replaced.options,
+                editorTheme: args.theme,
+                language: args.language,
+                signal: args.signal,
+                customCss: args.customCss,
+                imagePolicy,
+                browserTimeoutMs: args.browserTimeoutMs,
+                renderTimeoutMs: args.renderTimeoutMs,
+                extractScriptPath: path.join(assetDir, 'docx-extract.js')
+            });
+            for (const warning of result.warnings) (args.onWarning ?? console.warn)(warning);
+            args.signal?.throwIfAborted();
+            if (args.stdout) {
+                await writeStdout(result.docx);
+                return [];
+            }
+            await fs.mkdir(path.dirname(output), { recursive: true });
+            await fs.writeFile(output, result.docx, { flag: args.force ? 'w' : 'wx', signal: args.signal });
+            args.signal?.throwIfAborted();
+            return [output];
+        }
         if (args.format === 'pdf') {
             const pdf = await renderPdf({
                 html, css,
