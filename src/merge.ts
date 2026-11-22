@@ -106,15 +106,17 @@ function resolveDocumentLinkPath(
     sourcePath: string, reference: DocumentLinkReference, workspaceRoot: string
 ): string | undefined {
     if (reference.workspaceRooted) return resolveLocalFileUri(sourcePath, reference.href, true, workspaceRoot);
-    const clean = decodeLocalResourceSource(reference.href);
-    if (!clean) return undefined;
-    if (/^file:/i.test(clean)) {
+    // file: の URL は、デコード前に`#`と`?`以降を切り落とし、デコードは fileURLToPath の1回に任せる。
+    // 先にデコードすると、ファイル名の`%23`が`#`に戻り、URL として解釈するときに断片と誤認されるため。
+    if (/^\s*file:/i.test(reference.href)) {
         try {
-            return path.normalize(fileURLToPath(clean));
+            return path.normalize(fileURLToPath(reference.href.trim().split('#', 1)[0].split('?', 1)[0]));
         } catch {
             return undefined;
         }
     }
+    const clean = decodeLocalResourceSource(reference.href);
+    if (!clean) return undefined;
     // ドライブ文字（C:）は1文字のスキームに見えるため、2文字以上のスキーム（https:、mailto:など）だけを除く。
     if (/^[a-z][a-z0-9+.-]+:/i.test(clean) || clean.startsWith('//')) return undefined;
     const normalized = clean.replace(/\\/g, path.sep);

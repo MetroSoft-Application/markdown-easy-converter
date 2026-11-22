@@ -4,7 +4,7 @@
  * 構成:
  * - A: 引数の検証（ブラウザー不要）。B: 文書間リンクの解決（Node、成果物が再公開する`resolveMergedLinks`）。
  * - C: 結合の規則（成果物が再公開する`mergeRenderedDocuments`をブラウザーで直接実行）。
- * - D〜O: test/fixtures/merge の「本」（11章）と、テストごとの最小の文書による PDF/DOCX の実出力の検証。
+ * - D〜O: サンプルの「本」（11章、`BOOK_FILES`を実行時に書き出す）と、テストごとの最小の文書による PDF/DOCX の実出力の検証。
  *   DOCXは本文・しおり・リンク・脚注・画像がXMLで読めるため構造の検証に、PDFはしおり・ページ数・用紙の検証に使う。
  *   各章を単独で変換した結果の合計と結合結果を比べ、結合で内容が欠けたり入れ替わったりしないことを確かめる。
  * 回帰リスク: 見出し・脚注の ID の衝突による飛び先の誤り、文書間リンクの切れ・誤った飛び先、別の文書の場所からの画像の誤読、
@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, link, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { inflateRawSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
@@ -31,8 +31,117 @@ import { findTestBrowser } from './browser.mjs';
 const cli = fileURLToPath(new URL('../dist/mve-convert.cjs', import.meta.url));
 /** 描画器の成果物。結合規則の単体検証で、実際の描画結果を作るために使う。 */
 const renderer = fileURLToPath(new URL('../dist/markdown-fallback.js', import.meta.url));
-/** サンプルの本と、本の外に置くファイル（結合しない文書・アクセス制限の対象の画像）。 */
-const fixtures = fileURLToPath(new URL('./fixtures/merge/', import.meta.url));
+/**
+ * サンプルの本（book/）と、本の外に置くファイル（extras/ の結合しない文書、outside/ のアクセス制限の対象の画像）。
+ * リポジトリにファイルとして置かず、テストの実行時に一時ディレクトリへ書き出す（`copyFixtures`）。
+ * 記法の全要素、画像の全形式（同名ファイルを別のディレクトリに置いて取り違えを検出する）、リンクの全形式、同名の見出し・脚注、
+ * Textile・混在記法・Marp・空の文書・front matter だけの文書・記号を含むファイル名を含む。
+ * 画像は 8x8 の単色で、色で取り違えを見分ける（book/figure.png は黄、02-figures は赤・青・緑・紫・橙など）。
+ */
+const BOOK_FILES = {
+  'book/00-cover.md': [
+    '---', 'title: 結合テスト総合マニュアル', 'author: テスト', 'mve-convert:', '  pdf:', '    margins:', '      top: 12', '---',
+    '# 表紙', '', '[toc]', '', '## この本の使い方', '', '各章へのリンク:', '',
+    '- [基本記法](01-basics.md)',
+    '- [基本記法の概要](01-basics.md#概要)',
+    '- [図の章](02-figures/chapter.md)',
+    '- [図の章の概要（./ 付き）](./02-figures/chapter.md#概要)',
+    '- [図表の章の概要](03-diagrams.md#概要)',
+    '- [リンクの章](04-links/links.md)',
+    '- [Textile の章の概要](05-textile.textile#概要)',
+    '- [混在記法の章](06-mixed.md)',
+    '- [スライドの章](07-marp.md)',
+    '- [空の章](08-empty.md)',
+    '- [front matter だけの章](09-front-matter-only.md)',
+    '- [記号を含む名前の章](10-names/%E5%A4%96%E9%83%A8%20%E6%96%87%E6%9B%B8%20%231.md)',
+    '- [結合しない文書](../extras/not-merged.md)',
+    '- [テキストファイル](../extras/notes.txt)',
+    '- [Web](https://example.com/)',
+    '- [メール](mailto:test@example.com)',
+    '', '## 概要', '', '表紙の概要[^cover]。', '', '[^cover]: 表紙の脚注。', ''
+  ].join('\n'),
+  'book/01-basics.md': [
+    '# 基本記法', '', '## 概要', '',
+    '**太字**、*斜体*、~~取り消し~~、`インラインコード`、<kbd>Ctrl</kbd>、絵文字 😀。', '',
+    '### リスト', '', '- 項目1', '  - 入れ子', '    - さらに入れ子', '- 項目2', '', '3. 三', '4. 四', '', '- [x] 完了', '- [ ] 未完了', '',
+    '### 表', '', '| 左 | 中央 | 右 |', '| :--- | :---: | ---: |', '| a | **b** | `c` |', '| 長いセル | [リンク](#概要) | $x^2$ |', '',
+    '### 引用と注意書き', '', '> 引用文', '>', '> > 入れ子の引用', '', '> [!NOTE]', '> 注意書きのブロック。', '',
+    '### コード', '', '```ts', 'const value: number = 1;', 'console.log(`value: ${value}`);', '```', '',
+    '### 数式', '', 'インライン $E = mc^2$ と別行立て:', '', '$$', '\\int_0^1 x\\,dx = \\frac{1}{2}', '$$', '',
+    '## 見出しに $a_i$ と `code` を含む', '', '## 脚注付きの見出し[^h]', '',
+    '本文の脚注[^1]と名前付き脚注[^named]。', '', '[^1]: 基本記法の脚注1。', '[^named]: 名前付きの脚注。', '[^h]: 見出しの脚注。', '',
+    'Setext 見出し', '-------------', '', '## 明示 ID {#shared-id}', '', '[明示 ID へ](#shared-id)、[同じ文書の概要へ](#概要)。', '',
+    '<details><summary>折りたたみ</summary>', '', '折りたたみの中身。', '', '</details>', '',
+    '<script>window.mveInjected = 1</script>', '', '<p onclick="window.mveInjected = 2">イベント属性を持つ段落</p>', '',
+    '[危険なリンク](javascript:alert(1))', '', '<!-- pagebreak -->', '', '## 改ページの後', '', '![ルートの図](figure.png)', '', '---', '',
+    '基本記法の最後の段落。', ''
+  ].join('\n'),
+  'book/02-figures/chapter.md': [
+    '# 図の章', '', '## 概要', '',
+    'この章の画像は、この章のディレクトリ（02-figures）から読む。表紙と同じディレクトリにも同名の figure.png（黄）があり、取り違えると色が変わる。', '',
+    '![PNG（赤）](figure.png "PNG の図")', '', '![JPEG（青）](figure.jpg)', '', '![GIF（緑）](figure.gif)', '', '![WebP（紫）](figure.webp)', '',
+    '![SVG（橙）](figure.svg)', '', '![空白を含む名前](<my figure.png>)', '', '![エンコードした名前](my%20figure.png)', '',
+    '![日本語の名前](図.png)', '', '![存在しない画像](missing.png)', '', '![画像でないファイル](not-image.png)', '',
+    '![外部の画像](../../outside/secret.png)', '',
+    '![data URI](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC)', '',
+    '<img src="figure.png" alt="生HTMLの画像" width="20">', '', '| 表の中の画像 |', '| --- |', '| ![表のPNG](figure.png) |', '',
+    '[基本記法の概要へ戻る](../01-basics.md#概要)', ''
+  ].join('\n'),
+  'book/02-figures/figure.svg': '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8"><rect id="shape" width="8" height="8" fill="#ff8000"/></svg>\n',
+  'book/02-figures/not-image.png': 'This file is named .png but is plain text, so it must not be embedded.\n',
+  'book/03-diagrams.md': [
+    '# 図表', '', '## 概要', '',
+    '```mermaid', 'flowchart LR', '  A[開始] --> B{判定}', '  B -->|はい| C[終了]', '  B -->|いいえ| A', '```', '',
+    '```mermaid', 'sequenceDiagram', '  Alice->>Bob: こんにちは', '  Bob-->>Alice: やあ', '```', '',
+    '```mermaid', 'classDiagram', '  class Animal {', '    +name: string', '  }', '  Animal <|-- Dog', '```', '',
+    '構文エラーの図（エラー表示に置き換わり、出力は続く）:', '', '```mermaid', 'graph TD', '  A -->', '```', ''
+  ].join('\n'),
+  'book/04-links/links.md': [
+    '# リンクの章', '', '## 概要', '',
+    '- [表紙へ](../00-cover.md)',
+    '- [表紙の概要へ](../00-cover.md#概要)',
+    '- [エンコードした断片](../01-basics.md#%E6%A6%82%E8%A6%81)',
+    '- [クエリ付き](../01-basics.md?view=1#概要)',
+    '- [明示 ID](../01-basics.md#shared-id)',
+    '- [Setext 見出し](../01-basics.md#setext-見出し)',
+    '- [存在しない断片](../01-basics.md#no-such-heading)',
+    '- [Textile の章](../05-textile.textile)',
+    '- [自分の概要](#概要)',
+    '- [自分の2つ目の概要](#概要-1)',
+    '- [自分自身のファイル](links.md#概要)',
+    '- [結合しない文書の断片](../../extras/not-merged.md#x)',
+    '- [ディレクトリ](../02-figures/)',
+    '- [不正なエスケープ](../01-basics.md#%E6%A6)',
+    '- [空の章](../08-empty.md)',
+    '', '## 概要', '', '同じ文書の中で重複した見出し。', ''
+  ].join('\n'),
+  'book/05-textile.textile': [
+    'h1. Textile の章', '', 'h2. 概要', '', '*太字* と _斜体_ と @コード@。', '', '* 項目1', '** 入れ子', '* 項目2', '', '# 番号1', '# 番号2', '',
+    '|_. 見出し |_. 値 |', '| a | 1 |', '| b | 2 |', '', 'bq. Textile の引用。', '', '"基本記法の概要へ":../01-basics.md#概要', '',
+    '!figure.png!', '', 'Textile の脚注[1]。', '', 'fn1. Textile の脚注本文。', ''
+  ].join('\n'),
+  'book/06-mixed.md': [
+    '# 混在記法の章', '', 'h2. Textile 記法の見出し', '', '*Textile の太字* と **Markdown の太字**。', '', '|_. 列1 |_. 列2 |', '| x | y |', '',
+    '## 概要', '', '混在記法の章の最後。', ''
+  ].join('\n'),
+  'book/07-marp.md': [
+    '---', 'marp: true', 'theme: default', 'paginate: true', '---', '# スライド1', '', 'スライドの内容。', '', '---', '', '# スライド2', '',
+    '![ルートの図](figure.png)', ''
+  ].join('\n'),
+  'book/08-empty.md': '',
+  'book/09-front-matter-only.md': '---\ntitle: 本文のない章\n---\n',
+  'book/10-names/外部 文書 #1.md': '# 記号を含む名前の章\n\n## 概要\n\n[表紙の使い方へ](../00-cover.md#この本の使い方)\n',
+  'extras/not-merged.md': '# 結合しない文書\n\n## x\n',
+  'extras/notes.txt': 'plain text\n',
+  'book/figure.png': Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAE0lEQVR4nGP8f4cBK2DCLjxYJQB3eAHrEj3BJQAAAABJRU5ErkJggg==', 'base64'),
+  'book/02-figures/figure.png': Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGO8w4AdMOEQH6QSALIMAOxjSSTlAAAAAElFTkSuQmCC', 'base64'),
+  'book/02-figures/figure.jpg': Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQgJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDn6KKK/Rj87P/Z', 'base64'),
+  'book/02-figures/figure.gif': Buffer.from('R0lGODdhCAAIAIEAAACgAAAAAAAAAAAAACwAAAAACAAIAAAIDwABCBxIsKDBgwgTKkwYEAA7', 'base64'),
+  'book/02-figures/figure.webp': Buffer.from('UklGRjoAAABXRUJQVlA4IC4AAADQAQCdASoIAAgAAUAmJaACdLoB+AADsAD++F9//1aHy0PlofwkP/OJY6nd2gAA', 'base64'),
+  'book/02-figures/my figure.png': Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGNkOFHBgA0wYRUdtBIA/hABUMQeg0QAAAAASUVORK5CYII=', 'base64'),
+  'book/02-figures/図.png': Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGNkYLjDgA0wYRUdtBIAsFQA7DNldgEAAAAASUVORK5CYII=', 'base64'),
+  'outside/secret.png': Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGP8z/CfARtgwio6aCUAkYsCDoRKzmMAAAAASUVORK5CYII=', 'base64'),
+};
 /** 子プロセスの終了コードと出力を取得するためのPromise版。 */
 const execute = promisify(execFile);
 /** CLIの再公開した関数をパッケージ成果物から読み込む。 */
@@ -45,7 +154,7 @@ if (process.env.MVE_REQUIRE_BROWSER_TESTS === '1' && !browserPath) {
 /** ブラウザーを使うテストの共通設定。 */
 const needsBrowser = { skip: !browserPath };
 
-/** サンプルの本の章（結合する順）。test/fixtures/merge/book からの相対パス。 */
+/** サンプルの本の章（結合する順）。`copyFixtures`で書き出したディレクトリからの相対パス。 */
 const BOOK = [
   '00-cover.md', '01-basics.md', '02-figures/chapter.md', '03-diagrams.md', '04-links/links.md', '05-textile.textile',
   '06-mixed.md', '07-marp.md', '08-empty.md', '09-front-matter-only.md', '10-names/外部 文書 #1.md'
@@ -76,7 +185,9 @@ const greenPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADE
  * @param {(directory: string) => Promise<void>} callback - 一時ディレクトリ内で実行する検証。
  */
 async function withDirectory(callback) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'mve-merge-test-'));
+  // macOS の一時ディレクトリ（/var/...）は /private/var/... へのシンボリックリンクで、CLI は作業ディレクトリの実体のパスで
+  // 入力を解決する。結果のパスと比べられるよう、実体のパスを渡す。
+  const directory = await realpath(await mkdtemp(path.join(tmpdir(), 'mve-merge-test-')));
   try {
     await callback(directory);
   } finally {
@@ -88,11 +199,11 @@ async function withDirectory(callback) {
 }
 
 /**
- * サンプルの本を一時ディレクトリへ複製する。テストが原本を書き換えないようにするため。
- * @param {string} directory - 複製先。`book/`・`extras/`・`outside/`ができる。
+ * サンプルの本（`BOOK_FILES`）を一時ディレクトリへ書き出す。
+ * @param {string} directory - 書き出し先。`book/`・`extras/`・`outside/`ができる。
  */
 async function copyFixtures(directory) {
-  await cp(fixtures, directory, { recursive: true });
+  await writeFiles(directory, BOOK_FILES);
 }
 
 /**
@@ -731,8 +842,13 @@ test('C6: page breaks are inserted only between documents with content', needsBr
       '<svg></svg>', '<div class="page-break" aria-label=""></div>']) {
       assert.equal((await inspect(page, await merge(['<p>A</p>', visible]))).breaks, visible.includes('page-break') ? 2 : 1, visible);
     }
-    assert.equal(await merge(['<p>A</p>', '<p>B</p>'], 'Page "break" <&>'),
-      '<p>A</p><div class="page-break" aria-label="Page &quot;break&quot; <&amp;>"></div><p>B</p>');
+    // 属性値の`<`・`>`をエスケープするかは Chromium の版で違うため、文字列ではなく DOM として読んだ値で比べる。
+    const labelled = await merge(['<p>A</p>', '<p>B</p>'], 'Page "break" <&>');
+    assert.deepEqual(await page.evaluate((markup) => {
+      const template = document.createElement('template');
+      template.innerHTML = markup;
+      return [...template.content.children].map((element) => [element.tagName, element.className, element.getAttribute('aria-label'), element.textContent]);
+    }, labelled), [['P', '', null, 'A'], ['DIV', 'page-break', 'Page "break" <&>', ''], ['P', '', null, 'B']]);
     assert.equal(await merge(['<p>A</p>', '<p>B</p>', '<p>C</p>', '<p>D</p>']).then((html) => html.split('page-break').length - 1), 3);
   });
 });
@@ -744,12 +860,13 @@ test('C6: page breaks are inserted only between documents with content', needsBr
 test('C7: merging keeps sanitized markup inert', needsBrowser, async () => {
   const { mergeRenderedDocuments } = require(cli);
   await withPage(async (page) => {
+    // 閉じていない<math>…<style>は後続の行をすべて飲み込むため、最後に置く。確認用のコードの行はその前に置く。
     const hostile = [
-      '# Hostile', '', '<script>window.bad = 1</script>', '', '<img src="x" onerror="window.bad = 2">', '',
+      '# Hostile', '', '`<script>` in code', '', '<script>window.bad = 1</script>', '', '<img src="x" onerror="window.bad = 2">', '',
       '[js](javascript:alert(1))', '', '<a href="javascript:alert(2)">raw js</a>', '', '<svg onload="window.bad = 3"><circle r="1"/></svg>', '',
       '<iframe src="https://example.com"></iframe>', '', '<noscript><p title="</noscript><img src=x onerror=alert(1)>"></noscript>', '',
-      '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>', '', '<details open ontoggle="window.bad = 4"><summary>s</summary>d</details>', '',
-      '`<script>` in code', ''
+      '<details open ontoggle="window.bad = 4"><summary>s</summary>d</details>', '',
+      '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>', ''
     ].join('\n');
     const first = await render(page, hostile);
     const second = await render(page, hostile.replace('# Hostile', '# Hostile again'));
@@ -785,7 +902,7 @@ test('C8: a single document without a table of contents passes through unchanged
   await withPage(async (page) => {
     for (const [name, format] of [['04-links/links.md', 'mixed'], ['06-mixed.md', 'mixed'], ['03-diagrams.md', 'mixed'],
       ['10-names/外部 文書 #1.md', 'mixed'], ['08-empty.md', 'mixed']]) {
-      const html = await render(page, await readFile(path.join(fixtures, 'book', name), 'utf8'), format);
+      const html = await render(page, BOOK_FILES[`book/${name}`], format);
       const merged = await page.evaluate(mergeRenderedDocuments, { documents: [{ html, links: {} }], pageBreakLabel: '' });
       assert.equal(merged, name === '08-empty.md' ? '' : html, name);
     }
@@ -1093,7 +1210,8 @@ test('G1: page settings come from the configuration and the first document only'
       [['wide.md', 'plain.md'], [595.92, 419.53], []],
       [['wide.md', 'b5.md'], [595.92, 419.53], ['b5.md']],
       [['plain.md', 'wide.md', 'b5.md'], [419.53, 595.92], ['wide.md', 'b5.md']],
-      [['b5.md', 'plain.md'], [498.9, 708.66], []],
+      // B5 は JIS の寸法（182 x 257 mm）。
+      [['b5.md', 'plain.md'], [516, 729.12], []],
       [['plain.md', 'empty-settings.md'], [419.53, 595.92], []],
     ];
     for (const [inputs, size, ignored] of cases) {
@@ -1457,7 +1575,7 @@ test('K1: documents are merged in command-line order without duplicates', needsB
 test('L1: encodings, line endings, and unusual file names', needsBrowser, async () => {
   await withDirectory(async (directory) => {
     await writeFiles(directory, {
-      'index.md': '# Index\n\n[bom](%E7%AB%A0%20one/bom.md#crlf-section) [cr](cr.md) [odd](odd%20%23%25%20name%20%F0%9F%98%80.md#emoji)\n',
+      'index.md': '# Index\n\n[bom](%E7%AB%A0%20one/bom.md#crlf-section) [cr](cr.md) [odd](odd%20%23%20%25%20name%20%F0%9F%98%80.md#emoji)\n',
       '章 one/bom.md': '\uFEFF# BOM chapter\r\n\r\n## CRLF section\r\n\r\nText.\r\n',
       'cr.md': '# CR chapter\r\rLine one.\r',
       'odd # % name 😀.md': '# Odd name\n\n## Emoji\n',
