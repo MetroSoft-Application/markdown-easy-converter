@@ -2,3 +2,4 @@ node_modules/
 dist/
 artifacts/
 RELEASING.md
+test/fixtures/merge/**

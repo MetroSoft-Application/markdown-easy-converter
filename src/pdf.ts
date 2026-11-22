@@ -498,12 +498,14 @@ export async function buildStandaloneHtml(request: PdfExportRequest): Promise<st
 
 /**
  * PDFの外部参照を出力へ埋め込む。
+ * `--merge`では文書ごとに異なる基準で相対画像を解決するため、結合前に文書ごとに呼ぶ（src/main.ts）。
+ * `src`だけを書き換え、`data-original-src`は残す。
  * @param html - 画像参照を書き換えるPDF本文のHTML。
- * @param documentUri - 画像の相対参照を解決する基準Markdown文書URI。
+ * @param documentPath - 画像の相対参照を解決する基準Markdown文書のパス。
  * @param policy - 読み込むローカルファイルの方針と警告の通知先。
- * @returns 読み込めた画像だけをData URLへ置き換えたHTML本文。
+ * @returns 読み込めた画像だけをData URLへ置き換えたHTML本文。読み込めなかった画像のタグは元のまま残す。
  */
-async function embedLocalImages(html: string, documentPath: string, policy: LocalImagePolicy): Promise<string> {
+export async function embedLocalImages(html: string, documentPath: string, policy: LocalImagePolicy): Promise<string> {
     // HTML内の相対画像を解決し、読み込めた画像だけをData URLへ置き換える。
     const matches = [...html.matchAll(/<img\b[^>]*>/gi)];
     let result = html;

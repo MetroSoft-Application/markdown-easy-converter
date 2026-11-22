@@ -1,18 +1,10 @@
 # Markdown Easy Convert
 
-`mve-convert` is a command-line tool that converts Markdown and Textile documents to HTML, PDF, or Word (DOCX), and between Markdown and Textile. The input document is never modified.
+`mve-convert` converts Markdown and Textile to HTML, PDF, or editable Word (DOCX), and rewrites Markdown and Textile syntax. Input files are never modified.
 
-- Headings, lists, task lists, tables, footnotes, and a `[toc]` table of contents
-- Syntax-highlighted code blocks
-- Math with KaTeX (`$...$` and `$$...$$`)
-- Mermaid diagrams rendered to SVG; in regular documents and Marp slide decks, a diagram that cannot be rendered (for example, a syntax error) is replaced by an error message, the rest of the document is still exported, and a warning is written to stderr (exit code 0)
-- Marp slide decks (PDF output only; HTML and DOCX output render the slide source as a regular document)
-- HTML with an optional heading outline sidebar, embedded images, and recursive conversion of linked documents
-- PDF paper sizes `A0`–`A6`, `B4`, and `B5`, with configurable margins, fonts, headers, and footers
-- Editable DOCX with Word headings, lists, tables, footnotes, and equations, using the PDF page settings (see [DOCX output](#docx-output))
-- Markdown ⇔ Textile conversion of the source text, without a browser (see [Converting between Markdown and Textile](#converting-between-markdown-and-textile))
-- Watch mode that converts a document again each time it is saved (see [Watching for changes](#watching-for-changes))
-- Settings from a `mve-convert.json` file found automatically, and per-document PDF settings in front matter
+- Rich content: tables, footnotes, highlighted code, KaTeX math, and Mermaid diagrams.
+- HTML with an optional outline and linked documents; PDF with configurable page layout and Marp slides; editable DOCX using the PDF page settings.
+- Batch conversion, merged PDF/DOCX, watch mode, and settings from JSON or document front matter.
 
 ## Requirements
 
@@ -31,54 +23,38 @@ mve-convert --help
 ## Quick start
 
 ```sh
-# Writes document.html next to document.md
 mve-convert document.md --format html
-
-# Writes document.pdf next to document.md
 mve-convert document.md --format pdf
-
-# Chooses the output path and overwrites an existing file
-mve-convert document.md --format pdf -o out/document.pdf --force
-
-# Writes document.docx next to document.md
 mve-convert document.md --format docx
-
-# --format can be omitted when -o ends in .html, .htm, .pdf, or .docx
-mve-convert document.md -o out/document.pdf
-
-# Converts many documents with one browser, keeping their relative locations
-mve-convert "docs/**/*.md" --format pdf --out-dir dist
-
-# Reads standard input and writes standard output
-cat document.md | mve-convert - --format html --base-dir . > document.html
-
-# Writes document.md, the Textile document rewritten in Markdown
-mve-convert document.textile --format md
-
-# Writes document.pdf again each time document.md is saved (Ctrl+C to stop)
-mve-convert document.md --format pdf --watch
 ```
 
-## Example
+Each command writes next to the input file. Use `-o` to choose another path and `--force` to replace an existing file.
 
-HTML output of [examples/sample.md](examples/sample.md) with the heading outline:
+## Output examples
+
+HTML with the heading outline, from [examples/sample.md](examples/sample.md):
 
 ![HTML output of the sample document](examples/images/sample-html.png)
 
-PDF output:
+PDF from the same sample:
 
 ![PDF output of the sample document](examples/images/sample-pdf.png)
+
+DOCX with editable headings, lists, and tables, from [examples/docx-sample.md](examples/docx-sample.md):
+
+![DOCX page with a table of contents, checklist, and table](examples/images/docx-sample.png)
 
 ## Options
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `--format html\|pdf\|docx\|md\|textile` | Output format. `md` and `textile` rewrite the source syntax (see [Converting between Markdown and Textile](#converting-between-markdown-and-textile)). Required unless `-o` ends in `.html`, `.htm`, `.pdf`, `.docx`, `.md`, `.markdown`, or `.textile`. | — |
+| `--format html\|pdf\|docx\|md\|textile` | Output format. `md` and `textile` rewrite the source syntax (see [Source syntax conversion](#source-syntax-conversion)). Required unless `-o` ends in `.html`, `.htm`, `.pdf`, `.docx`, `.md`, `.markdown`, or `.textile`. | — |
 | `-o, --output PATH` | Output file path. Missing directories are created. `-` writes to standard output. | Input path with `.html`, `.pdf`, `.docx`, `.md`, or `.textile` |
-| `--watch` | After converting, keep running and convert each input again whenever it changes. See [Watching for changes](#watching-for-changes). | Off |
+| `--watch` | Reconvert inputs when they change. See [Watch mode](#watch-mode). | Off |
+| `--merge` | Combine inputs in one PDF or DOCX. See [Merge into one file](#merge-into-one-file). | Off |
 | `--out-dir PATH` | Output directory. Inputs keep their locations relative to their common parent directory. Cannot be combined with `-o`. | — |
 | `--base-dir PATH` | Base directory for relative links when reading standard input. | Current directory |
-| `--title TEXT` | Document title. Applies to a single input. | See [Document title and front matter](#document-title-and-front-matter) |
+| `--title TEXT` | Document title. Applies to a single input, or to the merged output with `--merge`. | See [Document title and front matter](#document-title-and-front-matter) |
 | `--css PATH` | CSS file added after the built-in styles, for HTML, PDF, and DOCX. Can be repeated, and replaces `rendering.css`. The file is inlined, so relative `url()` references are not resolved from its location; use `data:` or absolute `https:` URLs. | — |
 | `--strict` | Exit with code 1 when any warning is reported. Output files are still written. | Off |
 | `--json` | Write the result to standard output as JSON. See [Scripting](#scripting). | Off |
@@ -103,15 +79,13 @@ PDF output:
 
 Options that start with `--html-` apply only to HTML output; combining them with `--format pdf` or `--format docx` is an error. Command-line options take precedence over the configuration file.
 
-### Converting linked documents
+## Multiple-document workflows
 
-With `--html-linked`, `mve-convert` follows links to other Markdown and Textile documents and converts each one to HTML:
+### Convert each input
 
-- Linked documents are written to the same relative location in the output directory. Documents outside the input directory are written under `_linked/`.
-- If any output file already exists, the conversion fails unless `--force` is set. With `--force`, all outputs can be overwritten.
-- Two different source documents cannot share one output path, even with `--force`.
-
-## Converting many documents
+```sh
+mve-convert "docs/**/*.md" --format pdf --out-dir dist
+```
 
 Pass several files or quoted wildcard patterns. `*` and `?` match within one path segment and `**` matches any number of directories. Patterns select only `.md`, `.markdown`, and `.textile` files, and wildcards skip hidden files, hidden directories, and `node_modules`. A file that exists under the exact name given is never treated as a pattern. A pattern that matches nothing is an error with exit code 1.
 
@@ -120,35 +94,58 @@ With `--out-dir`, locations are relative to the part of each pattern before the 
 - All documents share one browser, so converting many files is much faster than running `mve-convert` once per file.
 - If one document fails, the others are still converted, and the exit code is 1.
 - If two inputs would write the same output file, nothing is written.
-- `-o`, `--title`, standard output, and `--html-linked` work with a single input only.
+- `-o`, `--title`, and standard output require one input unless `--merge` is used. `--html-linked` requires one input.
 
-## Converting between Markdown and Textile
+### Follow linked HTML documents
+
+`--html-linked` starts from one input and converts linked Markdown and Textile documents to HTML. Linked files keep their relative paths; files outside the input directory go under `_linked/`. Existing outputs require `--force`, and two inputs cannot share one output path.
+
+```sh
+mve-convert document.md --format html --html-linked --out-dir dist
+```
+
+### Merge into one file
+
+`--merge` combines files in command-line order into one PDF or DOCX. Repeated inputs are used once. A `[toc]` covers all chapters. Links to existing headings in included files work across chapters.
+
+```sh
+mve-convert examples/merge/01-overview.md examples/merge/02-verification.md --merge -o guide.pdf
+```
+
+Use `-o guide.docx` for Word output. `--merge` requires `-o` and does not accept standard input or `--out-dir`. Relative images resolve from each source file; the first file controls page settings. A failed input does not write or replace the output. Marp slides become regular documents.
+
+The merged PDF, pages 1 and 2:
+
+![Merged PDF page 1: table of contents spanning both files](examples/images/merge-pdf-1.png)
+
+![Merged PDF page 2: the verification chapter](examples/images/merge-pdf-2.png)
+
+## Source syntax conversion
 
 `--format md` rewrites a Textile document in Markdown, and `--format textile` rewrites a Markdown document in Textile. The result is source text, not rendered output, so no browser is started.
+
+```sh
+mve-convert document.textile --format md
+```
 
 - The input syntax follows `rendering.renderFormat`: `.textile` files are Textile, and other files and standard input are Markdown. Converting a document to the syntax it already uses is an error (exit code 2).
 - Line endings, the final newline, and a UTF-8 BOM are kept as in the input. Code blocks, inline code, and raw HTML are not rewritten.
 - Each element is written with the syntax of the same meaning, for example a Mermaid fence and `bc(mermaid).`. Where the target syntax has no equivalent, such as a nested quote, the closest form is written and a warning lists the line numbers (exit code 0, or 1 with `--strict`).
 - Rendering options such as `--css`, `--theme`, and the `pdf` settings do not apply.
 
-## Watching for changes
+## Watch mode
 
 With `--watch`, `mve-convert` converts the inputs, then keeps running and converts an input again each time it is saved. Press Ctrl+C to stop (exit code 130). The browser stays open, so conversions after the first one are faster.
+
+```sh
+mve-convert document.md --format pdf --watch
+```
 
 - Only the inputs given on the command line are watched. Linked documents, images, CSS, the configuration file, and files created later are not. Wildcards are expanded once, at the start.
 - A failed conversion is reported on stderr and watching continues.
 - Output files written in this run are overwritten on the next change. An output that already existed before the run is overwritten only with `--force`.
 - `--watch` cannot be combined with standard input, standard output, or `--json`.
-
-## DOCX output
-
-`--format docx` writes a Word document that can be edited in Microsoft Word. It is built from the same rendering as PDF output, so the `pdf` settings and `--css` apply to it as well:
-
-- Paper size, orientation, margins, font sizes, line height, paragraph spacing, and the header and footer come from the `pdf` settings. `{page}` and `{pages}` become Word page number fields.
-- Headings use the Word heading styles and appear in the navigation pane. Lists, tables, footnotes, links to headings, and `[toc]` become Word lists, tables, footnotes, bookmarks, and a table of contents field. Update the field in Word to add page numbers.
-- Math becomes editable Word equations. An expression that cannot be converted is embedded as an image, and a warning is written to stderr (exit code 0).
-- PNG, JPEG, GIF, and BMP images are embedded as they are. Mermaid diagrams, remote images, and other image formats (SVG, WebP, AVIF, ICO) are embedded as PNG images of their rendering.
-- Fonts are referenced by name and are not embedded. Install the fonts that the document uses, or set `pdf.fontFamily`, to get the same look on another computer.
+- With `--merge`, a change to any input rebuilds the merged file from all inputs.
 
 ## Document title and front matter
 
@@ -178,29 +175,9 @@ mve-convert:
 
 `--html-embed-images`, PDF output, and DOCX output embed a local file only when its content is an image, whatever its name: PNG, JPEG, GIF, WebP, BMP, ICO, or AVIF, or, for files named `.svg`, a document whose first element is `svg`. Other files are not embedded, and a warning is written to stderr (exit code 0).
 
+In DOCX, SVG, WebP, AVIF, and ICO images are rendered as PNGs.
+
 Directories are not restricted by default. Use `--restrict-local-files` when converting untrusted documents; it limits images and `--html-linked` documents to `--workspace-root` (the input directory by default), and on Windows it refuses network paths without connecting to them. Without `--html-embed-images`, HTML output only references images: it checks that a local image exists so that a missing one can be reported, and it does not read the image or check network paths.
-
-## Scripting
-
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Success. Warnings may have been written to stderr. |
-| `1` | A conversion failed, `--strict` found warnings, or the configuration has an unknown key inside `pdf` or `html`. |
-| `2` | Invalid arguments or other invalid configuration. |
-| `130` | Interrupted. |
-
-Without `--json`, standard output lists the written files, one per line. With `--json`, it contains one JSON object:
-
-```json
-{
-  "ok": true,
-  "results": [
-    { "input": "/docs/a.md", "outputs": ["/docs/a.pdf"], "warnings": [] }
-  ]
-}
-```
-
-A failed or interrupted input also has an `error` string. If no conversion started, for example because of invalid arguments, the object has a top-level `error` string instead. Warnings are written to stderr in both modes.
 
 ## Configuration file
 
@@ -263,7 +240,7 @@ mve-convert document.md --format pdf --config export.json
 
 ### `pdf`
 
-These settings also apply to DOCX output. Out-of-range numbers are clamped to the listed range.
+These settings also apply to DOCX output. Out-of-range numbers are clamped to the listed range. In DOCX, `{page}` and `{pages}` become Word fields.
 
 | Key | Description | Default |
 | --- | --- | --- |
@@ -276,13 +253,41 @@ These settings also apply to DOCX output. Out-of-range numbers are clamped to th
 | `footerAlign` | `left`, `center`, or `right`. | `center` |
 | `headerFooterFontSize` | Header and footer text size in points, 4–24. | `6` |
 | `headerFooterPadding` | Header and footer left and right padding in millimeters, 0–50. | `15` |
-| `fontFamily` | CSS font stack for body text. | Noto Sans JP stack |
+| `fontFamily` | CSS font stack for body text. DOCX references fonts by name rather than embedding them; install them on the target computer to preserve the appearance. | Noto Sans JP stack |
 | `bodyFontSize` | Body text size in points, 6–48. | `11` |
 | `headingFontSizes` | `h1`–`h6` sizes in points, 6–72. | 24, 20, 16, 14, 12, 11 |
 | `codeFontSize` | Code size in points, 6–36. | `9` |
 | `lineHeight` | Line height multiplier, 0.8–3. | `1.6` |
 | `paragraphSpacing` | Space after paragraphs in points, 0–48. | `6` |
 | `textReplacements` | Array of `{ "pattern": "...", "replacement": "..." }`. Each `pattern` is a regular expression applied to every match in the output text. `replacement` is inserted literally. Also applies to HTML output and the document title. This does not guarantee redaction: the HTML outline sidebar, heading anchors, and Mermaid source attributes keep the original text. | `[]` |
+
+## Scripting
+
+Use `-` to read standard input or write standard output:
+
+```sh
+cat document.md | mve-convert - --format html --base-dir . > document.html
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Success. Warnings may have been written to stderr. |
+| `1` | A conversion failed, `--strict` found warnings, or the configuration has an unknown key inside `pdf` or `html`. |
+| `2` | Invalid arguments or other invalid configuration. |
+| `130` | Interrupted. |
+
+Without `--json`, standard output lists the written files, one per line. With `--json`, it contains one JSON object:
+
+```json
+{
+  "ok": true,
+  "results": [
+    { "input": "/docs/a.md", "outputs": ["/docs/a.pdf"], "warnings": [] }
+  ]
+}
+```
+
+A failed or interrupted input also has an `error` string. If no conversion started, for example because of invalid arguments, the object has a top-level `error` string instead. Warnings are written to stderr in both modes.
 
 ## Troubleshooting
 
@@ -298,6 +303,10 @@ mve-convert document.md --format pdf --browser /usr/bin/chromium
 ```
 
 On Linux, an installed browser can also fail to start because of missing system libraries. See the [Playwright browser requirements](https://playwright.dev/docs/browsers).
+
+**The DOCX table of contents has no page numbers.** Update the table of contents field in Word.
+
+**A DOCX equation is an image.** Equations that cannot be converted to Word equations are embedded as images with a warning.
 
 ## License
 

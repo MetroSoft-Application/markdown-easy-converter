@@ -1,13 +1,14 @@
 {
   "name": "@metrosoft/markdown-easy-converter",
-  "version": "0.3.0",
-  "description": "CLI for converting Markdown, Textile, and Marp documents to HTML and PDF",
+  "version": "0.3.1",
+  "description": "CLI for converting Markdown, Textile, and Marp documents to HTML, PDF, and DOCX",
   "keywords": [
     "markdown",
     "textile",
     "marp",
     "html",
     "pdf",
+    "docx",
     "converter",
     "cli"
   ],
@@ -60,7 +61,7 @@
     "build": "node build.mjs",
     "prepack": "npm run build",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/cli.test.mjs test/print-assets.test.mjs test/docx.test.mjs",
+    "test": "npm run build && node --test test/cli.test.mjs test/print-assets.test.mjs test/docx.test.mjs test/merge.test.mjs",
     "test:package": "node scripts/package-smoke.mjs"
   }
 }

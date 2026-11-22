@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { BrowserContext, Page } from 'playwright-core';
 import { ensureHtmlExtension, prepareHtmlExport, stripUtf8Bom, writePreparedHtml } from './html';
-import { acquirePdfBrowser, closePdfBrowser, PdfBrowserUnavailableError, renderPdf, template } from './pdf';
+import { acquirePdfBrowser, closePdfBrowser, embedLocalImages, PdfBrowserUnavailableError, renderPdf, template } from './pdf';
 import { renderDocx } from './docx/render';
 import { closePeleRenderer, MermaidDiagramError, renderPeleMermaid } from './runtime/peleMermaid';
 import { MAX_IMAGE_COUNT, MAX_MERMAID_IMAGE_BYTES, resolveMermaidImageSources } from './runtime/mermaidImages';
@@ -27,6 +27,7 @@ import { createMarpPdfExportContent } from './renderer/marp/marpPdfExport';
 import { prepareExportHtml } from './shared/exportHtml';
 import { printContentCss } from './shared/printContentCss';
 import { getMessages, SUPPORTED_LANGUAGES, type SupportedLanguage } from './shared/messages';
+import { collectMergedDocumentLinks, mergeRenderedDocuments, resolveMergedLinks, type MergedDocumentInput } from './merge';
 
 /**
  * バンドルを直接読み込むテストが自動検出の失敗を組み立てられるよう再公開する。
@@ -35,6 +36,11 @@ import { getMessages, SUPPORTED_LANGUAGES, type SupportedLanguage } from './shar
 export { PdfBrowserUnavailableError };
 /** PDF本文の圧縮によりヘッダーの文字列を生成物から検証できないため、テスト用にテンプレート生成を再公開する。 */
 export { template as headerFooterTemplate };
+/**
+ * 文書の結合規則（ID の改名・リンク・目次）をブラウザーで、文書間リンクの解決を Node で直接検証できるよう、テスト用に再公開する。
+ * 公開 API として互換性を保証しない。
+ */
+export { mergeRenderedDocuments, resolveMergedLinks };
 
 /**
  * ファイル入力型CLIが受け付ける出力形式。拡張子もこの値（`.html`・`.pdf`・`.docx`・`.md`・`.textile`）になる。
@@ -118,6 +124,11 @@ export interface Arguments {
     noConfig?: boolean;
     /** `--watch`の指定。trueなら初回の変換後も入力の変更を監視し、変わった入力だけを変換し直す。 */
     watch?: boolean;
+    /**
+     * `--merge`の指定。trueなら全入力を入力の順に1つのPDF/DOCX（`output`、または標準出力）へまとめる。
+     * 形式はPDFとDOCXだけで、出力先は`-o`で必ず指定する（`parseArguments`で検証済み）。
+     */
+    merge?: boolean;
     signal?: AbortSignal;
 }
 
@@ -127,14 +138,16 @@ const assetDir = __dirname;
 const usage = `Usage: mve-convert INPUT.md --format html|pdf|docx|md|textile [-o OUTPUT]
        mve-convert INPUT.md "docs/**/*.md" --format html|pdf|docx|md|textile --out-dir DIR
        mve-convert - --format html|pdf|docx|md|textile [-o OUTPUT] < INPUT.md
+       mve-convert INPUT.md "docs/**/*.md" --merge --format pdf|docx -o OUTPUT
   INPUT                   File, wildcard pattern (*, ?, **), or - for stdin
   --format FORMAT         html, pdf, docx, or md / textile to rewrite the syntax;
                           optional when -o ends in .html, .htm, .pdf, .docx, .md, .markdown, or .textile
   -o, --output PATH       Output file (default: INPUT with the format's extension); - for stdout
   --watch                 Convert again whenever an input file changes (Ctrl+C to stop)
+  --merge                 Combine all inputs, in order, into one PDF or DOCX (-o)
   --out-dir PATH          Output directory for one or more inputs
   --base-dir PATH         Base directory for relative links when reading stdin
-  --title TEXT            Document title (single input)
+  --title TEXT            Document title (single input or --merge)
   --css PATH              Additional CSS file; can be repeated
   --strict                Exit with code 1 when any warning is reported
   --json                  Write the result to stdout as JSON
@@ -213,10 +226,12 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
     let configPath: string | undefined;
     let noConfig = false;
     let watch = false;
+    let merge = false;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
         if (arg === '--no-config') { noConfig = true; continue; }
         if (arg === '--watch') { watch = true; continue; }
+        if (arg === '--merge') { merge = true; continue; }
         if (arg === '--html-linked') { linked = true; continue; }
         if (arg === '--html-embed-images') { embedImages = true; continue; }
         if (arg === '--html-no-embed-images') { embedImages = false; continue; }
@@ -316,6 +331,10 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
     // 監視は実ファイルの変更を待つため、標準入出力では成り立たない。--jsonは結果を1度だけ出す形式のため組み合わせない。
     if (watch && (stdin || stdout)) throw new Error('Invalid --watch: it cannot be combined with standard input or output.');
     if (watch && json) throw new Error('Invalid --watch: it cannot be combined with --json.');
+    // 結合はページを持つ形式だけが対象。出力は1ファイルのため、入力から既定の出力先を決めず-oで明示させる。
+    if (merge && format !== 'pdf' && format !== 'docx') throw new Error('Invalid --merge: it supports --format pdf and docx only.');
+    if (merge && stdin) throw new Error('Invalid --merge: it cannot be combined with standard input.');
+    if (merge && !output) throw new Error('Invalid --merge: name the merged file with -o (or -o - for standard output).');
     const virtualInput = path.join(baseDir ?? process.cwd(), 'stdin.md');
     return {
         input: stdin ? virtualInput : path.resolve(inputs[0]),
@@ -323,7 +342,7 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
         restrictLocalFiles, browserTimeoutMs, renderTimeoutMs, cssPaths, frontMatter,
         output: output && output !== '-' ? path.resolve(output) : undefined, format,
         language, browserPath, workspaceRoot, theme, mermaidTheme, linked, embedImages, outline, force, configPath,
-        noConfig, watch
+        noConfig, watch, merge
     };
 }
 
@@ -608,9 +627,11 @@ async function resolveDiagramImages(
  * 構文エラーなど`MermaidDiagramError`で失敗した図は、`data-mermaid-status="error"`と`pre.mermaid-error-message`の
  * エラー表示（ローカライズ済みの見出しと失敗理由）へ置き換えて出力を続け、stderrへ警告する。
  * キャンセルや描画ページを用意できないブラウザー・Workerの障害は例外として呼び出し側へ伝播する。
+ * @param diagramNamespace - 図のSVG内のIDに付ける接頭辞。`<接頭辞>-<図の番号>`で一意にする。
+ *   `--merge`では複数の文書の図が1つのページに並ぶため、文書ごとに異なる値を渡す。省略時は従来どおり`cli`。
  */
 async function renderMarkdownFile(
-    page: Page, markdown: string, sourceFile: string, args: Arguments
+    page: Page, markdown: string, sourceFile: string, args: Arguments, diagramNamespace = 'cli'
 ): Promise<string> {
     const renderFormat = resolveRenderFormat(sourceFile, args.renderFormat);
     const html = await page.evaluate(({ source, format, language, remoteImagesEnabled }) => {
@@ -658,7 +679,7 @@ async function renderMarkdownFile(
             (args.onWarning ?? console.warn)(`Mermaid diagram ${index + 1} could not be rendered (${error.message}); an error message was embedded instead.`);
             return { reason: error.message };
         }
-        return namespaceMermaidSvg(result.svg, `cli-${index}`);
+        return namespaceMermaidSvg(result.svg, `${diagramNamespace}-${index}`);
     }));
     return prepareExportHtml(await page.evaluate(({ markup, svgs, errorMessage }) => {
         const root = document.createElement('div');
@@ -1196,6 +1217,181 @@ async function convertSyntaxFile(args: Arguments, syntax: SyntaxConversion, outp
     return [output];
 }
 
+/**
+ * `--merge`で、特定の入力文書の読み込み・検証・描画に失敗したことを表す。
+ * 文言の先頭に入力のパスを付け、どの文書が原因かを示す。終了コードは元の例外（`cause`）で決める（`exitCodeFor`）。
+ */
+class MergeDocumentError extends Error {
+    /**
+     * @param input - 失敗した入力文書の絶対パス。
+     * @param cause - 元の例外。
+     */
+    constructor(readonly input: string, cause: unknown) {
+        super(`${input}: ${formatCliError(cause)}`, { cause });
+        this.name = 'MergeDocumentError';
+    }
+}
+
+/**
+ * `--merge`の警告の通知先。
+ * @param input - 警告の原因の入力文書。結合後の処理（PDF/DOCX生成・出力置換）の警告ではundefined。
+ * @param message - 警告の文言。
+ */
+type MergeWarning = (input: string | undefined, message: string) => void;
+
+/**
+ * 全入力を入力の順に1つのPDF/DOCXへまとめて保存する。他の変換と同じく直列化して実行する（`convert`と同じ規則）。
+ * @param args - 検証済みの変換要求。`output`（または`stdout`）が結合先。
+ * @param inputs - 結合する入力の絶対パス（重複なし、結合する順）。
+ * @param warn - 警告の通知先。
+ * @returns 書き込んだ出力パス。標準出力へ書いた場合は空。
+ */
+function convertMerged(args: Arguments, inputs: readonly string[], warn: MergeWarning): Promise<readonly string[]> {
+    const result = conversionTail.then(() => convertMergedExclusive(args, inputs, warn));
+    conversionTail = result.then(() => undefined, () => undefined);
+    return result;
+}
+
+/**
+ * 文書ごとに描画してから1つの本文へ結合し、PDF/DOCXとして保存する。
+ * 文書ごとに行う処理: front matterの除去と検証、Markdown/Textileの描画（Mermaidの図は文書ごとの名前空間）、
+ * 文書の場所を基準にしたローカル画像の埋め込み（`--restrict-local-files`の基準も文書ごと）、文書間リンクの解決。
+ * 結合後に1回だけ行う処理: 目次の作り直し・改ページ（src/merge.ts）、タイトルの決定、出力置換、PDF/DOCXの生成。
+ * ページ設定は先頭の文書のfront matter（`mve-convert.pdf`）を使い、2件目以降の設定は検証したうえで無視して警告する。
+ * Marpのスライドは用紙の大きさが異なるため、DOCXと同じく通常の文書として結合して警告する。
+ * 1件でも失敗したら何も書き込まない。
+ * @param args - 検証済みの変換要求。
+ * @param inputs - 結合する入力の絶対パス。
+ * @param warn - 警告の通知先。
+ * @returns 書き込んだ出力パス。標準出力へ書いた場合は空。
+ * @throws 入力文書に起因する失敗は`MergeDocumentError`、出力先の衝突・PDF/DOCX生成の失敗は元の例外。
+ */
+async function convertMergedExclusive(
+    args: Arguments, inputs: readonly string[], warn: MergeWarning
+): Promise<readonly string[]> {
+    args.signal?.throwIfAborted();
+    const output = args.output;
+    if (!output && !args.stdout) throw new Error('Invalid --merge: name the merged file with -o (or -o - for standard output).');
+    if (output && !args.stdout) {
+        await assertDistinctFiles(inputs, [output]);
+        if (!args.force) {
+            try {
+                await fs.stat(output);
+                throw new Error(`Output already exists: ${output}`);
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            }
+        }
+    }
+    let context: BrowserContext | undefined;
+    /** 中断中のブラウザー評価を止め、finally で残りの資源を解放する。 */
+    const abortContext = () => { void context?.close().catch(() => undefined); };
+    // 同じディレクトリの画像の確認を全文書で使い回す（1回の変換の間だけ有効なキャッシュ）。
+    const networkDirectoryCache = new Map<string, Promise<boolean>>();
+    const directoryListingCache = new Map<string, Promise<Set<string>>>();
+    try {
+        const browser = await acquirePdfBrowser(args.language, args.browserPath, args.browserTimeoutMs);
+        args.signal?.throwIfAborted();
+        context = await browser.newContext({ javaScriptEnabled: true });
+        args.signal?.addEventListener('abort', abortContext, { once: true });
+        args.signal?.throwIfAborted();
+        const page = await context.newPage();
+        await page.addScriptTag({ path: path.join(assetDir, 'markdown-fallback.js') });
+        const documents: MergedDocumentInput[] = [];
+        let pdfOptions: PdfOptions | undefined;
+        let frontMatterTitle: string | undefined;
+        for (const [index, input] of inputs.entries()) {
+            /** この文書の警告として通知する。 */
+            const onWarning = (message: string): void => warn(input, message);
+            try {
+                const stat = await fs.stat(input);
+                if (!stat.isFile()) throw new Error('Input must be a file.');
+                const markdown = stripUtf8Bom(await fs.readFile(input, 'utf8'));
+                const metadata = extractDocumentMetadata(markdown, resolveRenderFormat(input, args.renderFormat), args.frontMatter);
+                // 無効な設定は2件目以降でも誤記として止める。有効でも、1つの出力に1つのページ設定しか使えないため無視する。
+                const documentOptions = resolveDocumentPdfOptions(args, metadata.exportSettings);
+                if (index === 0) {
+                    pdfOptions = documentOptions;
+                    frontMatterTitle = metadata.frontMatterTitle;
+                } else if (documentOptions !== args.pdfOptions) {
+                    onWarning('Front matter mve-convert.pdf settings were ignored; merged output uses the first document\'s page settings.');
+                }
+                if (hasMarpFrontMatterCandidate(markdown) && isMarpMarkdown(markdown, parseMarpFrontMatter)) {
+                    onWarning('Marp slides were merged as a regular document.');
+                }
+                const rendered = await renderMarkdownFile(page, metadata.body, input, { ...args, input, onWarning }, `cli-m${index}`);
+                // 結合後は先頭の文書の場所で画像を解決するため、ここで文書の場所を基準に埋め込む。
+                const html = await embedLocalImages(rendered, input, {
+                    onWarning,
+                    restrictRoot: args.restrictLocalFiles ? args.workspaceRoot ?? path.dirname(input) : undefined,
+                    networkDirectoryCache,
+                    directoryListingCache
+                });
+                const references = await page.evaluate(collectMergedDocumentLinks, html);
+                documents.push({
+                    html,
+                    links: resolveMergedLinks(references, input, inputs, args.workspaceRoot ?? path.dirname(input))
+                });
+            } catch (error) {
+                if (args.signal?.aborted) throw error;
+                throw new MergeDocumentError(input, error);
+            }
+        }
+        args.signal?.throwIfAborted();
+        const merged = await page.evaluate(mergeRenderedDocuments, {
+            documents, pageBreakLabel: getMessages(args.language).renderer.pageBreak
+        });
+        const replacementOptions = pdfOptions ?? DEFAULT_PDF_OPTIONS;
+        const explicitTitle = args.title ?? frontMatterTitle;
+        const title = chooseDocumentTitle(explicitTitle,
+            explicitTitle === undefined ? await readFirstHeading(page, merged) : undefined, inputs[0]);
+        // {file}は先頭の文書の名前にする。標準出力では出力ファイル名がなく、入力の名前なら常に決まるため。
+        const placeholders = { title, file: path.basename(inputs[0]), date: formatLocalDate(new Date()) };
+        const replaced = await replaceOutput(page, merged, {
+            ...replacementOptions,
+            header: expandHeaderFooterPlaceholders(replacementOptions.header, placeholders),
+            footer: expandHeaderFooterPlaceholders(replacementOptions.footer, placeholders)
+        }, args.format, title);
+        const fontFamily = args.fontFamily ?? DEFAULT_FONT_FAMILY_STACK;
+        const css = printContentCss(fontFamily) + '\n' + await fs.readFile(path.join(assetDir, 'print-assets.css'), 'utf8');
+        /** 結合後の処理の警告は特定の文書に結び付けない。 */
+        const onWarning = (message: string): void => warn(undefined, message);
+        // ローカル画像は文書ごとに埋め込み済みで、残りは再解決しない印を付けてある。基準と方針は念のため単独の変換と同じにする。
+        const imagePolicy: LocalImagePolicy = {
+            onWarning,
+            restrictRoot: args.restrictLocalFiles ? args.workspaceRoot ?? path.dirname(inputs[0]) : undefined,
+            networkDirectoryCache,
+            directoryListingCache
+        };
+        const common = {
+            html: replaced.html, css, title: replaced.title, documentPath: inputs[0], browserPath: args.browserPath,
+            options: replaced.options, editorTheme: args.theme, language: args.language, signal: args.signal,
+            customCss: args.customCss, imagePolicy, browserTimeoutMs: args.browserTimeoutMs, renderTimeoutMs: args.renderTimeoutMs
+        };
+        let bytes: Buffer;
+        if (args.format === 'docx') {
+            const result = await renderDocx({ ...common, extractScriptPath: path.join(assetDir, 'docx-extract.js') });
+            for (const warning of result.warnings) onWarning(warning);
+            bytes = result.docx;
+        } else {
+            bytes = await renderPdf(common);
+        }
+        args.signal?.throwIfAborted();
+        if (args.stdout || !output) {
+            await writeStdout(bytes);
+            return [];
+        }
+        await fs.mkdir(path.dirname(output), { recursive: true });
+        await fs.writeFile(output, bytes, { flag: args.force ? 'w' : 'wx', signal: args.signal });
+        args.signal?.throwIfAborted();
+        return [output];
+    } finally {
+        args.signal?.removeEventListener('abort', abortContext);
+        await context?.close().catch(() => undefined);
+        if (!args.keepResources) await closeConversionResources();
+    }
+}
+
 /** 変換で共有するMermaid描画ページとブラウザーを閉じる。未起動の場合は何もしない。 */
 async function closeConversionResources(): Promise<void> {
     await closePeleRenderer();
@@ -1274,10 +1470,12 @@ interface ConversionRecord {
  * 例外を終了コードへ変換する。
  * @param error - 発生した例外。
  * @param aborted - 中断の通知を受けている場合にtrue。
- * @returns 中断は130、引数・設定エラーは2、変換エラーは1。
+ * @returns 中断は130、引数・設定エラーは2、変換エラーは1。`--merge`の文書の失敗は元の例外で判定する。
  */
 function exitCodeFor(error: unknown, aborted: boolean): number {
     if (aborted) return 130;
+    // 文言の先頭に入力のパスを付けているため、元の例外の文言で引数・設定の誤り（front matterの誤記など）を判定する。
+    if (error instanceof MergeDocumentError) return exitCodeFor(error.cause, aborted);
     return error instanceof Error && /^(Unknown argument|Missing value|Invalid |Input Markdown path|--format|--html-|Only one input|Configuration |rendering |pdf must|html must|browserPath must|workspaceRoot must|Unknown configuration|Unknown rendering)/.test(error.message)
         ? 2 : 1;
 }
@@ -1328,7 +1526,8 @@ async function readCustomCss(cssPaths: readonly string[] | undefined): Promise<s
  */
 function assertInputCombination(args: Arguments, inputs: readonly string[]): void {
     if (args.stdout && args.linked) throw new Error('Invalid output: --html-linked cannot be combined with standard output.');
-    if (inputs.length <= 1) return;
+    // 結合は全入力から1つの出力を作るため、-o・--title・標準出力を複数入力でも使える（--html-linkedはHTML専用で併用不可）。
+    if (inputs.length <= 1 || args.merge) return;
     if (args.stdout) throw new Error('Invalid output: multiple inputs cannot be written to standard output.');
     if (args.output) throw new Error('Invalid output: use --out-dir with multiple inputs.');
     if (args.title) throw new Error('Invalid title: --title applies to a single input.');
@@ -1355,6 +1554,13 @@ async function convertAll(
 ): Promise<void> {
     // 監視中の再変換は変わった入力だけを渡すため、表示の形式と重複検査は監視対象の全入力で決める。
     const allInputs = watch?.inputs ?? inputs;
+    // 結合では変わった入力だけでなく全入力から作り直す（1件だけでは結合結果を作れないため）。
+    // Windowsでは大文字と小文字だけが違う指定（A.md と a.md）も同じ文書のため、最初の指定だけを結合する。
+    if (args.merge) {
+        const seen = new Set<string>();
+        const unique = allInputs.filter((input) => !seen.has(watchKey(input)) && Boolean(seen.add(watchKey(input))));
+        return convertMergedAll(args, unique, signal, records, watch);
+    }
     const batch = allInputs.length > 1;
     const extension = '.' + args.format;
     const base = args.outDir ? commonDirectory(bases) : undefined;
@@ -1392,6 +1598,48 @@ async function convertAll(
                 await closeConversionResources();
             }
         }
+    } finally {
+        if (!watch) await closeConversionResources();
+    }
+}
+
+/**
+ * `--merge`の全入力を1つの出力へまとめ、結果を入力ごとに記録する。
+ * 記録は`--json`の形式（入力ごとの`input`・`outputs`・`warnings`・`error`）を保ち、全入力の`outputs`に同じ結合先を入れる。
+ * 文書に結び付く警告はその入力へ、結合後の処理の警告は先頭の入力へ記録する（`--strict`は全件を数える）。
+ * 失敗時は何も書き込まず、全入力に同じエラーを記録する。
+ * @param args - 設定を反映した変換要求。
+ * @param inputs - 結合する入力（展開済み、結合する順）。
+ * @param signal - 中断の通知。
+ * @param records - 入力ごとの結果を追加する配列。
+ * @param watch - `--watch`の状態。指定時は失敗しても例外を伝播せず、ブラウザーを閉じずに残す。
+ * @throws 監視なしの失敗と中断は例外を伝播し、終了コードを`exitCodeFor`で決める。
+ */
+async function convertMergedAll(
+    args: Arguments, inputs: readonly string[], signal: AbortSignal, records: ConversionRecord[], watch?: WatchState
+): Promise<void> {
+    const entries = inputs.map((input): ConversionRecord => ({ input, outputs: [], warnings: [] }));
+    records.push(...entries);
+    const byInput = new Map(inputs.map((input, index) => [input, entries[index]]));
+    try {
+        const outputs = await convertMerged({
+            ...args, signal, keepResources: true,
+            // 監視中は、この実行で書き込んだ結合先だけを上書きする。実行前からあった出力は--forceがなければ守る。
+            force: args.force || watch?.written.has(inputs[0]) === true
+        }, inputs, (input, message) => {
+            (input !== undefined && byInput.get(input) || entries[0]).warnings.push(message);
+            console.warn((input !== undefined && inputs.length > 1 ? `${input}: ` : '') + message);
+        });
+        signal.throwIfAborted();
+        for (const entry of entries) entry.outputs = outputs;
+        if (outputs.length) for (const input of inputs) watch?.written.add(input);
+        if (!args.json) for (const file of outputs) process.stdout.write(file + '\n');
+    } catch (error) {
+        const message = signal.aborted ? INTERRUPTED_MESSAGE : formatCliError(error);
+        for (const entry of entries) entry.error = message;
+        if (!watch || signal.aborted) throw error;
+        process.stderr.write(message + '\n');
+        await closeConversionResources();
     } finally {
         if (!watch) await closeConversionResources();
     }

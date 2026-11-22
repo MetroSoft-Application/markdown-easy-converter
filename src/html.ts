@@ -970,11 +970,14 @@ function rewriteLinkTag(
 
 /**
  * HTML文書を基準にローカルリソース参照をファイルURIへ解決する。
- * @param baseUri - 相対参照の基準となるHTMLまたはMarkdown文書のURI。
- * @param source - MarkdownまたはHTMLから取得したローカルURI、パス、参照文字列。
- * @returns 条件に一致する値。未検出時はundefinedまたはnull。
+ * `--merge`の文書間リンク（src/merge.ts）は、ワークスペース基準のリンクだけをこの関数で解決する。
+ * @param basePath - 相対参照の基準となるHTMLまたはMarkdown文書のパス。
+ * @param source - MarkdownまたはHTMLから取得したローカルURI、パス、参照文字列。`#`以降と`?`以降は無視する。
+ * @param workspaceRooted - trueなら`/`で始まる参照を`workspaceRoot`から解決する。基準文書がその外にあれば解決しない。
+ * @param workspaceRoot - ワークスペース基準の参照の基準ディレクトリ。省略時は基準文書のディレクトリ。
+ * @returns 解決した絶対パス。リモート参照、空の参照、解決できない参照ではundefined。
  */
-function resolveLocalFileUri(basePath: string, source: string, workspaceRooted = false, workspaceRoot = path.dirname(basePath)): string | undefined {
+export function resolveLocalFileUri(basePath: string, source: string, workspaceRooted = false, workspaceRoot = path.dirname(basePath)): string | undefined {
     const clean = decodeLocalResourceSource(source);
     if (!clean || isRemoteResource(clean)) return undefined;
     if (workspaceRooted && clean.startsWith('/')) {
