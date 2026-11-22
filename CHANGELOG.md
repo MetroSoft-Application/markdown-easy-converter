@@ -27,6 +27,6 @@
 - Adds `--watch` and `--format md|textile` to convert between Markdown and Textile.
 - Adds `mve-convert.json` auto-detection and per-document PDF settings in front matter.
 
-## 0.3.1
+## 0.3.2
 
 - Adds `--merge` to combine several documents into one PDF or DOCX.
