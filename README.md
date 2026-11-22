@@ -1,6 +1,6 @@
 # Markdown Easy Convert
 
-`mve-convert` is a command-line tool that converts Markdown and Textile documents to HTML, PDF, or Word (DOCX). The input document is never modified.
+`mve-convert` is a command-line tool that converts Markdown and Textile documents to HTML, PDF, or Word (DOCX), and between Markdown and Textile. The input document is never modified.
 
 - Headings, lists, task lists, tables, footnotes, and a `[toc]` table of contents
 - Syntax-highlighted code blocks
@@ -10,6 +10,9 @@
 - HTML with an optional heading outline sidebar, embedded images, and recursive conversion of linked documents
 - PDF paper sizes `A0`–`A6`, `B4`, and `B5`, with configurable margins, fonts, headers, and footers
 - Editable DOCX with Word headings, lists, tables, footnotes, and equations, using the PDF page settings (see [DOCX output](#docx-output))
+- Markdown ⇔ Textile conversion of the source text, without a browser (see [Converting between Markdown and Textile](#converting-between-markdown-and-textile))
+- Watch mode that converts a document again each time it is saved (see [Watching for changes](#watching-for-changes))
+- Settings from a `mve-convert.json` file found automatically, and per-document PDF settings in front matter
 
 ## Requirements
 
@@ -48,6 +51,12 @@ mve-convert "docs/**/*.md" --format pdf --out-dir dist
 
 # Reads standard input and writes standard output
 cat document.md | mve-convert - --format html --base-dir . > document.html
+
+# Writes document.md, the Textile document rewritten in Markdown
+mve-convert document.textile --format md
+
+# Writes document.pdf again each time document.md is saved (Ctrl+C to stop)
+mve-convert document.md --format pdf --watch
 ```
 
 ## Example
@@ -60,16 +69,13 @@ PDF output:
 
 ![PDF output of the sample document](examples/images/sample-pdf.png)
 
-DOCX output, opened in a word processor:
-
-![DOCX output of the sample document](examples/images/sample-docx.png)
-
 ## Options
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `--format html\|pdf\|docx` | Output format. Required unless `-o` ends in `.html`, `.htm`, `.pdf`, or `.docx`. | — |
-| `-o, --output PATH` | Output file path. Missing directories are created. `-` writes to standard output. | Input path with `.html`, `.pdf`, or `.docx` |
+| `--format html\|pdf\|docx\|md\|textile` | Output format. `md` and `textile` rewrite the source syntax (see [Converting between Markdown and Textile](#converting-between-markdown-and-textile)). Required unless `-o` ends in `.html`, `.htm`, `.pdf`, `.docx`, `.md`, `.markdown`, or `.textile`. | — |
+| `-o, --output PATH` | Output file path. Missing directories are created. `-` writes to standard output. | Input path with `.html`, `.pdf`, `.docx`, `.md`, or `.textile` |
+| `--watch` | After converting, keep running and convert each input again whenever it changes. See [Watching for changes](#watching-for-changes). | Off |
 | `--out-dir PATH` | Output directory. Inputs keep their locations relative to their common parent directory. Cannot be combined with `-o`. | — |
 | `--base-dir PATH` | Base directory for relative links when reading standard input. | Current directory |
 | `--title TEXT` | Document title. Applies to a single input. | See [Document title and front matter](#document-title-and-front-matter) |
@@ -80,7 +86,8 @@ DOCX output, opened in a word processor:
 | `--front-matter auto\|render` | `auto` removes YAML front matter from the output. `render` keeps it in the document. | `auto` |
 | `--browser-timeout SEC` | Browser startup timeout in seconds, up to 3600. | `5` |
 | `--render-timeout SEC` | PDF and DOCX generation timeout in seconds, up to 3600. | `60` |
-| `--config PATH` | JSON configuration file. See [Configuration file](#configuration-file). | — |
+| `--config PATH` | JSON configuration file. See [Configuration file](#configuration-file). | Nearest `mve-convert.json` |
+| `--no-config` | Do not look for `mve-convert.json`. Cannot be combined with `--config`. | Off |
 | `--force` | Overwrite existing output files. | Off |
 | `--browser PATH` | Browser executable used for rendering. | Edge, then Chrome |
 | `--language CODE` | Language of generated labels (outline, table of contents, copy button) and the HTML `lang` attribute: `ja`, `en`, `zh-cn`, `ko`, `fr`, `de`, or `es`. Document text is not translated. | `en` |
@@ -115,6 +122,24 @@ With `--out-dir`, locations are relative to the part of each pattern before the 
 - If two inputs would write the same output file, nothing is written.
 - `-o`, `--title`, standard output, and `--html-linked` work with a single input only.
 
+## Converting between Markdown and Textile
+
+`--format md` rewrites a Textile document in Markdown, and `--format textile` rewrites a Markdown document in Textile. The result is source text, not rendered output, so no browser is started.
+
+- The input syntax follows `rendering.renderFormat`: `.textile` files are Textile, and other files and standard input are Markdown. Converting a document to the syntax it already uses is an error (exit code 2).
+- Line endings, the final newline, and a UTF-8 BOM are kept as in the input. Code blocks, inline code, and raw HTML are not rewritten.
+- Each element is written with the syntax of the same meaning, for example a Mermaid fence and `bc(mermaid).`. Where the target syntax has no equivalent, such as a nested quote, the closest form is written and a warning lists the line numbers (exit code 0, or 1 with `--strict`).
+- Rendering options such as `--css`, `--theme`, and the `pdf` settings do not apply.
+
+## Watching for changes
+
+With `--watch`, `mve-convert` converts the inputs, then keeps running and converts an input again each time it is saved. Press Ctrl+C to stop (exit code 130). The browser stays open, so conversions after the first one are faster.
+
+- Only the inputs given on the command line are watched. Linked documents, images, CSS, the configuration file, and files created later are not. Wildcards are expanded once, at the start.
+- A failed conversion is reported on stderr and watching continues.
+- Output files written in this run are overwritten on the next change. An output that already existed before the run is overwritten only with `--force`.
+- `--watch` cannot be combined with standard input, standard output, or `--json`.
+
 ## DOCX output
 
 `--format docx` writes a Word document that can be edited in Microsoft Word. It is built from the same rendering as PDF output, so the `pdf` settings and `--css` apply to it as well:
@@ -130,6 +155,24 @@ With `--out-dir`, locations are relative to the part of each pattern before the 
 A YAML front matter block at the start of a Markdown document is not written to the output. A leading block between `---` lines is treated as front matter only when it parses as a YAML mapping (`key: value`); anything else stays in the document. In `.textile` files, only a block with `marp: true` is removed. To keep the block in the output as in earlier versions, set `rendering.frontMatter` to `render`.
 
 The HTML `<title>` and the PDF and DOCX document titles come from `--title`, then the front matter `title`, then the first level-1 heading, then the file name. `textReplacements` also apply to the title.
+
+### Per-document settings
+
+The `mve-convert` key in the front matter of a Markdown document changes the [`pdf` settings](#pdf) for that document only. It accepts the same keys and values as the configuration file:
+
+```yaml
+---
+title: Wide tables
+mve-convert:
+  pdf:
+    orientation: landscape
+    margins: { left: 10, right: 10 }
+---
+```
+
+- Front matter settings take precedence over the configuration file. Keys inside `margins` and `headingFontSizes` are merged one by one; other values, including `textReplacements`, replace the configured value.
+- Invalid keys or values are reported as errors and the document is not converted (exit code 2 for a single input).
+- They apply to PDF and DOCX output, and `textReplacements` also to HTML output. Linked documents converted with `--html-linked` use the settings of the main document.
 
 ## Local images
 
@@ -161,7 +204,7 @@ A failed or interrupted input also has an `error` string. If no conversion start
 
 ## Configuration file
 
-Pass a JSON file with `--config`. All keys are optional, and unknown keys or invalid values are reported as errors. Relative `browserPath` and `workspaceRoot` values are resolved from the configuration file's directory.
+Pass a JSON file with `--config`. Without `--config`, `mve-convert` uses the file named `mve-convert.json` in the current directory or the nearest parent directory, if there is one; `--no-config` turns this off. All keys are optional, and unknown keys or invalid values are reported as errors. Relative `browserPath` and `workspaceRoot` values are resolved from the configuration file's directory.
 
 ```json
 {

@@ -510,6 +510,30 @@ test('PDF document titles use the resolved title', { skip: !browserPath }, async
 });
 
 /**
+ * HTMLアウトラインの最小幅・項目フォント・ヘッダーの折り返し防止を検証する。
+ * 回帰リスク: CSS・区切りバーの aria-valuemin・リサイズスクリプトの最小幅が食い違うこと、
+ * 最小幅で日本語の「アウトライン」見出しが2行に折り返すこと（実描画は拡張側の実機確認で目視）。
+ */
+test('HTML outline allows an 80px minimum with a smaller font and a non-wrapping header', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const input = path.join(directory, 'input.md');
+    const output = path.join(directory, 'output.html');
+    await writeFile(input, '# 見出し\n\n本文\n');
+    await execute(process.execPath, [cli, input, '--format', 'html', '--output', output, '--force',
+      '--browser', browserPath, '--html-outline', '--language', 'ja']);
+    const html = await readFile(output, 'utf8');
+    assert.match(html, /class="mve-html-outline-resizer"[^>]*aria-valuemin="80"/);
+    assert.match(html, /grid-template-columns: minmax\(80px, var\(--mve-html-outline-width, 240px\)\)/);
+    assert.match(html, /const minimumWidth = 80;/);
+    assert.match(html, /\.mve-html-outline nav \{[^}]*font-size: 14px;/);
+    // 1階層あたりの字下げは拡張側のエディターのアウトライン（styles.css の --outline-indent）と同じ12pxにする。
+    assert.match(html, /\.mve-html-outline-children \{ margin-left: 12px; \}/);
+    assert.match(html, /\.mve-html-outline-header > span \{[^}]*white-space: nowrap;/);
+    assert.match(html, /<span>アウトライン<\/span>/);
+  });
+});
+
+/**
  * YAMLのオブジェクトであるfront matterだけを本文、アウトライン、リンク追跡から除くことを検証する。
  * 回帰リスク: 先頭に水平線を置いた通常の文書の本文が失われること、CRLFの文書で除去に失敗すること。
  * `rendering.frontMatter: "render"`は0.1.2以前の表示へ戻す互換用の設定である。
@@ -962,10 +986,14 @@ test('--format can be inferred from the output extension only', async () => {
   assert.equal(parseArguments(['a.md', '-o', 'a.pdf', '--format', 'html']).format, 'html');
   assert.equal(parseArguments(['a.md', '-o', 'a.DOCX']).format, 'docx');
   assert.equal(parseArguments(['a.md', '-o', 'a.docx', '--format', 'pdf']).format, 'pdf');
-  assert.throws(() => parseArguments(['a.md']), /--format html\|pdf\|docx is required/);
-  assert.throws(() => parseArguments(['a.md', '-o', 'a.txt']), /--format html\|pdf\|docx is required/);
+  // 記法の書き換え（--format md|textile）も出力の拡張子から推定する。
+  assert.equal(parseArguments(['a.textile', '-o', 'a.MD']).format, 'md');
+  assert.equal(parseArguments(['a.textile', '-o', 'a.markdown']).format, 'md');
+  assert.equal(parseArguments(['a.md', '-o', 'a.textile']).format, 'textile');
+  assert.throws(() => parseArguments(['a.md']), /--format html\|pdf\|docx\|md\|textile is required/);
+  assert.throws(() => parseArguments(['a.md', '-o', 'a.txt']), /--format html\|pdf\|docx\|md\|textile is required/);
   // .doc は旧形式で出力できないため、DOCXと推定しない。
-  assert.throws(() => parseArguments(['a.md', '-o', 'a.doc']), /--format html\|pdf\|docx is required/);
+  assert.throws(() => parseArguments(['a.md', '-o', 'a.doc']), /--format html\|pdf\|docx\|md\|textile is required/);
 });
 
 /**
@@ -1315,4 +1343,178 @@ test('browser auto-detection failure tells CLI users how to pass a browser', () 
     + 'error while loading shared libraries: libnss3.so: cannot open shared object file'), missingLibrary);
   assert.equal(formatCliError(new Error('Output already exists: x')), 'Output already exists: x');
   assert.equal(formatCliError('plain failure'), 'plain failure');
+});
+
+/**
+ * --format md|textile が描画せずに記法だけを書き換え、原文の改行コード・BOM・入力ファイルを保つことを検証する。
+ * 回帰リスク: 書き換えでCRLFがLFになる、BOMが消える・増える、同じ記法への変換で入力を上書きする、
+ * 同じ意味の記法がない行を黙って変える（警告がない）、変換を止めてしまうこと。
+ * ブラウザーを使わないため、ブラウザーのない環境でも実行する。
+ */
+test('--format md and textile rewrite the syntax without a browser', async () => {
+  await withDirectory(async (directory) => {
+    const textile = path.join(directory, 'doc.textile');
+    /** 入力の文字コード判定を保つため、BOM は入力にあるときだけ出力にも付ける。 */
+    const bom = String.fromCharCode(0xfeff);
+    const textileSource = bom + 'h1. Title\r\n\r\n* one *bold*\r\n* two\r\n';
+    await writeFile(textile, textileSource);
+    // 存在しないブラウザーを指定し、ブラウザーを起動しないことも確かめる。
+    const missingBrowser = path.join(directory, 'no-browser.exe');
+    const toMarkdown = await execute(process.execPath, [cli, textile, '--format', 'md', '--browser', missingBrowser]);
+    const markdownOutput = path.join(directory, 'doc.md');
+    assert.equal(toMarkdown.stdout.trim(), markdownOutput);
+    assert.equal(await readFile(markdownOutput, 'utf8'), bom + '# Title\r\n\r\n- one **bold**\r\n- two\r\n');
+    assert.equal(await readFile(textile, 'utf8'), textileSource);
+
+    const markdown = path.join(directory, 'note.md');
+    await writeFile(markdown, '# Note\n\n> quote\n> > nested\n');
+    const toTextile = await execute(process.execPath, [cli, markdown, '-o', '-', '--format', 'textile']);
+    assert.match(toTextile.stdout, /^h1\. Note\n/);
+    assert.match(toTextile.stderr, /Line\(s\) \d+(, \d+)* use syntax that has no exact equivalent/);
+    await assert.rejects(execute(process.execPath, [cli, markdown, '--format', 'textile', '--strict', '--force']),
+      (error) => error.code === 1 && /treated as errors by --strict/.test(error.stderr));
+    assert.ok(await readFile(path.join(directory, 'note.textile'), 'utf8'), '--strict still writes the output');
+
+    // 同じ記法への変換は、既定の出力先が入力と同じになるため、上書きせず理由を示して止める。
+    await assert.rejects(execute(process.execPath, [cli, markdown, '--format', 'md', '--force']),
+      (error) => error.code === 2 && /is already Markdown; use --format textile/.test(error.stderr));
+    assert.equal(await readFile(markdown, 'utf8'), '# Note\n\n> quote\n> > nested\n');
+    await assert.rejects(execute(process.execPath, [cli, markdownOutput, '--format', 'md', '-o', path.join(directory, 'x.md')]),
+      (error) => error.code === 2 && /is already Markdown/.test(error.stderr));
+    // 既存の出力は --force がなければ上書きしない。
+    await assert.rejects(execute(process.execPath, [cli, textile, '--format', 'md']),
+      (error) => error.code === 1 && /Output already exists/.test(error.stderr));
+  });
+});
+
+/**
+ * --config がないとき、カレントディレクトリから親へ向かって mve-convert.json を探して使うことを検証する。
+ * 回帰リスク: 見つけた設定の誤りでどのファイルか分からない、--no-config で無効化できない、
+ * --config より自動検出が優先される、同名のディレクトリを設定として読もうとして失敗すること。
+ * 無効な設定（終了コード2）と記法の書き換え（ブラウザー不要）で、ブラウザーなしに判定する。
+ */
+test('mve-convert.json is found from the current directory upward unless --no-config is given', async () => {
+  await withDirectory(async (directory) => {
+    const nested = path.join(directory, 'a', 'b');
+    await mkdir(path.join(nested, 'mve-convert.json'), { recursive: true });
+    const input = path.join(nested, 'doc.textile');
+    await writeFile(input, 'h1. Title\n');
+    const found = path.join(directory, 'mve-convert.json');
+    await writeFile(found, JSON.stringify({ pdf: { format: 'Letter' } }));
+    await assert.rejects(execute(process.execPath, [cli, input, '--format', 'md'], { cwd: nested }),
+      (error) => error.code === 2 && /^Invalid pdf\.format\./m.test(error.stderr)
+        && error.stderr.includes(`(in ${found}; pass --no-config to ignore it)`));
+    const ignored = await execute(process.execPath, [cli, input, '--format', 'md', '--no-config'], { cwd: nested });
+    assert.equal(ignored.stdout.trim(), path.join(nested, 'doc.md'));
+    // --config の指定が自動検出より優先する。
+    const explicit = path.join(directory, 'explicit.json');
+    await writeFile(explicit, JSON.stringify({ pdf: { format: 'A5' } }));
+    await execute(process.execPath, [cli, input, '--format', 'md', '--force', '--config', explicit], { cwd: nested });
+    await assert.rejects(execute(process.execPath, [cli, input, '--format', 'md', '--config', explicit, '--no-config']),
+      (error) => error.code === 2 && /--config and --no-config cannot be combined/.test(error.stderr));
+  });
+});
+
+/**
+ * front matter の mve-convert.pdf が、設定ファイルの pdf に項目単位で重なり、この文書の PDF にだけ効くことを検証する。
+ * 回帰リスク: 設定ファイルの値が front matter で丸ごと消える、無効値が黙って既定値になる、
+ * front matter のない文書の出力が変わること。
+ */
+test('front matter mve-convert.pdf overrides the configuration for one document', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const config = path.join(directory, 'export.json');
+    await writeFile(config, JSON.stringify({ pdf: { format: 'A5', margins: { top: 20 } } }));
+    /**
+     * PDF の最初のページの幅と高さ（ポイント）が期待値と1ポイント以内で一致することを確かめる。
+     * A5 の幅は 595.92pt のように端数を持つため、丸めではなく許容差で比べる。
+     */
+    const assertPageSize = async (file, [width, height]) => {
+      const box = /\/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]/.exec((await readFile(file)).toString('latin1'));
+      assert.ok(box, 'the PDF must have a page');
+      const actual = [Number(box[3]) - Number(box[1]), Number(box[4]) - Number(box[2])];
+      assert.ok(Math.abs(actual[0] - width) <= 1 && Math.abs(actual[1] - height) <= 1,
+        `expected ${width}x${height}pt, received ${actual.join('x')}pt`);
+    };
+    const landscape = path.join(directory, 'landscape.md');
+    await writeFile(landscape, '---\ntitle: Wide\nmve-convert:\n  pdf:\n    orientation: landscape\n---\n# Wide\n');
+    await execute(process.execPath, [cli, landscape, '--format', 'pdf', '--config', config, '--browser', browserPath]);
+    // 用紙サイズ（A5）は設定ファイル、向きは front matter から取る。
+    await assertPageSize(path.join(directory, 'landscape.pdf'), [595.92, 419.53]);
+    const plain = path.join(directory, 'plain.md');
+    await writeFile(plain, '# Plain\n');
+    await execute(process.execPath, [cli, plain, '--format', 'pdf', '--config', config, '--browser', browserPath]);
+    await assertPageSize(path.join(directory, 'plain.pdf'), [419.53, 595.92]);
+
+    for (const [name, body, message] of [
+      ['letter.md', 'mve-convert:\n  pdf:\n    format: Letter\n', /Invalid front matter mve-convert: Invalid pdf\.format\./],
+      ['html.md', 'mve-convert:\n  html: {}\n', /Invalid front matter mve-convert: Unknown mve-convert key: html/],
+      ['scalar.md', 'mve-convert: landscape\n', /Invalid front matter mve-convert: mve-convert must be an object\./],
+    ]) {
+      const input = path.join(directory, name);
+      await writeFile(input, `---\n${body}---\n# Bad\n`);
+      await assert.rejects(execute(process.execPath, [cli, input, '--format', 'pdf', '--browser', browserPath]),
+        (error) => error.code === 2 && message.test(error.stderr));
+      await assert.rejects(readFile(input.replace(/\.md$/, '.pdf')), { code: 'ENOENT' });
+    }
+  });
+});
+
+/**
+ * --watch が変更された入力だけを変換し直し、実行前からあった出力を --force なしでは上書きしないことを検証する。
+ * 回帰リスク: 監視中の再変換が「Output already exists」で失敗し続ける、逆に既存の出力を黙って上書きする、
+ * 1件の失敗で監視が止まる、Ctrl+C で終了しないこと。
+ * Windows では子プロセスへ SIGINT を送れないため、停止用ファイルを見て SIGINT を発生させる読み込み前のスクリプトを使う。
+ */
+test('--watch converts changed inputs again until interrupted', { skip: !browserPath }, async () => {
+  await withDirectory(async (directory) => {
+    const kept = path.join(directory, 'kept.md');
+    const edited = path.join(directory, 'edited.md');
+    const stop = path.join(directory, 'stop');
+    const preload = path.join(directory, 'stop.cjs');
+    await writeFile(kept, '# Kept\n');
+    await writeFile(edited, '# First\n');
+    await writeFile(path.join(directory, 'kept.html'), 'sentinel');
+    await writeFile(preload, [
+      "const fs = require('node:fs');",
+      `const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(stop)})) { clearInterval(timer); process.emit('SIGINT'); } }, 50);`,
+      'timer.unref();',
+      ''
+    ].join('\n'));
+    const child = spawn(process.execPath, ['--require', preload, cli, kept, edited, '--format', 'html', '--watch', '--browser', browserPath]);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+    /** 条件が満たされるまで待つ。固定の待ち時間で隠さず、満たされなければ出力を添えて失敗する。 */
+    const waitFor = async (condition, label) => {
+      const deadline = Date.now() + 60_000;
+      while (!condition()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}\nstdout: ${stdout}\nstderr: ${stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    const editedOutput = path.join(directory, 'edited.html');
+    try {
+      await waitFor(() => /Watching 2 file\(s\)/.test(stderr), 'the watcher to start');
+      assert.match(stderr, /kept\.md: Output already exists/);
+      assert.match(await readFile(editedOutput, 'utf8'), /First/);
+      await writeFile(edited, '# Second\n');
+      await waitFor(() => stdout.split(editedOutput).length - 1 >= 2, 'the edited document to be converted again');
+      assert.match(await readFile(editedOutput, 'utf8'), /Second/);
+      assert.equal(await readFile(path.join(directory, 'kept.html'), 'utf8'), 'sentinel');
+    } finally {
+      await writeFile(stop, '');
+    }
+    assert.equal(await exited, 130, stderr);
+  });
+});
+
+/** --watch は実ファイルの変更を待つため、標準入出力と --json との組み合わせを書き込み前に拒否する。 */
+test('--watch rejects standard input, standard output, and --json', () => {
+  const { parseArguments } = require(cli);
+  assert.equal(parseArguments(['a.md', '--format', 'html', '--watch']).watch, true);
+  assert.throws(() => parseArguments(['-', '--format', 'html', '--watch']), /Invalid --watch/);
+  assert.throws(() => parseArguments(['a.md', '-o', '-', '--format', 'html', '--watch']), /Invalid --watch/);
+  assert.throws(() => parseArguments(['a.md', '--format', 'html', '--watch', '--json']), /Invalid --watch/);
 });

@@ -28,7 +28,15 @@ export interface DocumentMetadata {
     body: string;
     /** front matterの`title`を空白正規化した値。未指定または空の場合はundefined。 */
     frontMatterTitle?: string;
+    /**
+     * front matterの`mve-convert`キーの値（文書ごとの出力設定）。未検証のYAML値をそのまま渡し、検証は呼び出し側が行う。
+     * front matterと確定できない場合、キーがない場合はundefined。`render`指定でも読み取る（本文の扱いとは独立のため）。
+     */
+    exportSettings?: unknown;
 }
+
+/** 文書ごとの出力設定を書くfront matterのキー。他のツールのキーと衝突しないよう、コマンド名で名前空間を分ける。 */
+export const FRONT_MATTER_SETTINGS_KEY = 'mve-convert';
 
 /**
  * 設定の指定と拡張子から、文書の描画形式を決める。
@@ -47,7 +55,7 @@ export function resolveRenderFormat(sourcePath: string, override?: DocumentRende
  * @param markdown - BOMを除去済みの文書本文。
  * @param renderFormat - 文書の描画形式。
  * @param mode - front matterの扱い。省略時は`auto`。
- * @returns 本文とタイトル。YAMLの構文エラーやオブジェクト以外の値では入力を本文としてそのまま返す。
+ * @returns 本文、タイトル、文書ごとの出力設定。YAMLの構文エラーやオブジェクト以外の値では入力を本文としてそのまま返す。
  */
 export function extractDocumentMetadata(
     markdown: string, renderFormat: DocumentRenderFormat, mode: FrontMatterMode = 'auto'
@@ -67,7 +75,8 @@ export function extractDocumentMetadata(
     if (renderFormat === 'textile' && !marp) return { body: markdown };
     return {
         body: marp || mode === 'auto' ? range.source.slice(range.bodyStart) : markdown,
-        frontMatterTitle: normalizeTitle(fields.title)
+        frontMatterTitle: normalizeTitle(fields.title),
+        exportSettings: Object.hasOwn(fields, FRONT_MATTER_SETTINGS_KEY) ? fields[FRONT_MATTER_SETTINGS_KEY] : undefined
     };
 }
 

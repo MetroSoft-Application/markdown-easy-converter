@@ -21,3 +21,8 @@
 
 - Adds `--format docx` for editable Word documents with native equations.
 - Fixes `--force` reruns wrongly refused on ReFS volumes.
+
+## 0.3.0
+
+- Adds `--watch` and `--format md|textile` to convert between Markdown and Textile.
+- Adds `mve-convert.json` auto-detection and per-document PDF settings in front matter.

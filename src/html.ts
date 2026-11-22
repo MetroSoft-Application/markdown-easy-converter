@@ -541,7 +541,7 @@ function buildHtmlOutlineSidebar(markdown: string, language: string, renderForma
 /** HTMLアウトラインのサイズを操作するセパレーターを作る。 */
 function buildHtmlOutlineResizer(language: string): string {
     const label = escapeAttribute(getMessages(language).app.outlineWidth);
-    return `<div class="mve-html-outline-resizer" role="separator" aria-label="${label}" aria-orientation="vertical" aria-valuemin="160" aria-valuemax="480" aria-valuenow="240" tabindex="0"></div>`;
+    return `<div class="mve-html-outline-resizer" role="separator" aria-label="${label}" aria-orientation="vertical" aria-valuemin="80" aria-valuemax="480" aria-valuenow="240" tabindex="0"></div>`;
 }
 
 /** アウトライン非表示中に、再表示できる操作ボタンを作る。 */
@@ -1221,7 +1221,7 @@ export const HTML_OUTLINE_RESIZER_SCRIPT = `
   if (!(layout instanceof HTMLElement) || !(separator instanceof HTMLElement)) return;
   const canToggleOutline = hideButton instanceof HTMLButtonElement && showButton instanceof HTMLButtonElement;
 
-  const minimumWidth = 160;
+  const minimumWidth = 80;
   const maximumWidth = 800;
   const separatorWidth = 8;
   const mainMinimumWidth = 240;
@@ -1300,7 +1300,7 @@ const HTML_CSS = /**
   body { margin: 0; font-family: ${fontFamily}; color: #202124; background: #fff; }
   .mve-html :is(h1, h2, h3, h4, h5, h6) { color: ${editorTheme === 'light' ? '#0969da' : '#0550ae'}; }
   .mve-html-layout { min-height: 100vh; }
-  .mve-html-layout-with-outline { display: grid; grid-template-columns: minmax(160px, var(--mve-html-outline-width, 240px)) 8px minmax(0, 1fr); grid-template-areas: "sidebar divider content"; }
+  .mve-html-layout-with-outline { display: grid; grid-template-columns: minmax(80px, var(--mve-html-outline-width, 240px)) 8px minmax(0, 1fr); grid-template-areas: "sidebar divider content"; }
   .mve-html { grid-area: content; min-width: 0; max-width: 100%; margin: 0 auto; padding: 24px; box-sizing: border-box; }
   .mve-html-outline { grid-area: sidebar; position: sticky; top: 0; box-sizing: border-box; height: 100vh; overflow: auto; border-right: 1px solid #dadce0; background: #f8f9fa; }
   .mve-html-layout-with-outline.mve-html-outline-hidden { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar" "content"; }
@@ -1316,15 +1316,16 @@ const HTML_CSS = /**
   .mve-html-outline-toggle { align-items: center; justify-content: center; border: 1px solid #dadce0; border-radius: 4px; background: #fff; color: #202124; cursor: pointer; font: inherit; }
   .mve-html-outline-toggle:hover { background: #e8eaed; }
   .mve-html-outline-toggle:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
-  .mve-html-outline-hide { display: inline-flex; width: 28px; height: 28px; padding: 0; font-size: 18px; line-height: 1; }
-  .mve-html-outline-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #dadce0; color: #5f6368; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .mve-html-outline-hide { display: inline-flex; flex: 0 0 auto; width: 24px; height: 24px; padding: 0; font-size: 18px; line-height: 1; }
+  .mve-html-outline-header { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 10px 6px 10px 8px; border-bottom: 1px solid #dadce0; color: #5f6368; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .mve-html-outline-header > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mve-html-outline-show { width: 36px; height: 36px; padding: 0; }
   .mve-html-outline-show-icon { position: relative; display: block; width: 18px; height: 16px; box-sizing: border-box; border: 1px solid currentColor; border-radius: 2px; }
   .mve-html-outline-show-icon::before { position: absolute; top: 0; bottom: 0; left: 5px; border-left: 1px solid currentColor; content: ''; }
   .mve-html-outline-show-icon::after { position: absolute; top: 3px; left: 9px; width: 5px; height: 1px; background: currentColor; box-shadow: 0 4px 0 currentColor, 0 8px 0 currentColor; content: ''; }
-  .mve-html-outline nav { padding: 8px 8px 12px; }
+  .mve-html-outline nav { padding: 8px 8px 12px; font-size: 14px; }
   .mve-html-outline-tree, .mve-html-outline-children { margin: 0; padding: 0; list-style: none; }
-  .mve-html-outline-children { margin-left: 18px; }
+  .mve-html-outline-children { margin-left: 12px; }
   .mve-html-outline a { display: block; overflow: hidden; padding: 3px 6px; border-radius: 3px; color: #202124; line-height: 1.4; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
   .mve-html-outline a:hover { background: #e8eaed; }
   .mve-html-outline a:focus-visible { outline: 2px solid #1a73e8; outline-offset: -2px; background: #e8eaed; }

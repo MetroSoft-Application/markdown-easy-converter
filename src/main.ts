@@ -4,7 +4,7 @@
  * ブラウザー資源を解放する。
  */
 import path from 'node:path';
-import { promises as fs } from 'node:fs';
+import { promises as fs, watch as watchDirectory } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { BrowserContext, Page } from 'playwright-core';
@@ -18,7 +18,8 @@ import { decodeLocalResourceSource } from './shared/resourceCheck';
 import { DEFAULT_HTML_EXPORT_OPTIONS, DEFAULT_PDF_OPTIONS, PDF_PAPER_FORMATS, isTextReplacementPatternValid, normalizeHtmlExportSettings, normalizePdfOptions, type HtmlExportOptions, type PdfOptions } from './shared/protocol';
 import { DEFAULT_FONT_FAMILY_STACK } from './shared/fontFamily';
 import { hasMarpFrontMatterCandidate, isMarpMarkdown } from './shared/marpFrontMatter';
-import { chooseDocumentTitle, expandHeaderFooterPlaceholders, extractDocumentMetadata, formatLocalDate, normalizeTitle, resolveRenderFormat, type FrontMatterMode } from './documentMetadata';
+import { chooseDocumentTitle, expandHeaderFooterPlaceholders, extractDocumentMetadata, formatLocalDate, FRONT_MATTER_SETTINGS_KEY, normalizeTitle, resolveRenderFormat, type FrontMatterMode } from './documentMetadata';
+import { convertDocumentSyntax, type DocumentSyntax } from './shared/formatConversion';
 import { commonDirectory, expandInputPatterns, outputPathInDirectory } from './inputPatterns';
 import { isPathInsideRoot, type LocalImagePolicy } from './localFiles';
 import { renderMarpMarkdown } from './renderer/marp/marpRenderer';
@@ -35,8 +36,23 @@ export { PdfBrowserUnavailableError };
 /** PDF本文の圧縮によりヘッダーの文字列を生成物から検証できないため、テスト用にテンプレート生成を再公開する。 */
 export { template as headerFooterTemplate };
 
-/** ファイル入力型CLIが受け付ける出力形式。拡張子もこの値（`.html`・`.pdf`・`.docx`）になる。 */
-export type OutputFormat = 'html' | 'pdf' | 'docx';
+/**
+ * ファイル入力型CLIが受け付ける出力形式。拡張子もこの値（`.html`・`.pdf`・`.docx`・`.md`・`.textile`）になる。
+ * `md`と`textile`は描画せず、原文の記法だけを書き換える（ブラウザーを起動しない）。
+ */
+export type OutputFormat = 'html' | 'pdf' | 'docx' | 'md' | 'textile';
+
+/**
+ * 原文の記法を書き換える出力形式かを判定する。
+ * @param format - 出力形式。
+ * @returns `md`または`textile`ならtrue。
+ */
+function isSyntaxFormat(format: OutputFormat): format is 'md' | 'textile' {
+    return format === 'md' || format === 'textile';
+}
+
+/** `--config`がないときに、カレントディレクトリから親へ向かって探す設定ファイル名。 */
+export const DEFAULT_CONFIG_FILE_NAME = 'mve-convert.json';
 /** HTML/PDF/DOCX出力で使用できる見出しテーマ。 */
 type Theme = 'dark' | 'light';
 /** 変換処理が受け取る正規化済みのCLI引数。 */
@@ -87,24 +103,35 @@ export interface Arguments {
     force?: boolean;
     markdown?: string;
     pdfOptions?: PdfOptions;
+    /**
+     * 設定ファイルの`pdf`の検証済み・正規化前の値。front matterの`mve-convert.pdf`と項目単位で重ねるために保持する。
+     * 正規化後の`pdfOptions`から重ねると、設定ファイルで省略した項目と既定値を区別できないため。
+     */
+    pdfConfig?: Record<string, unknown>;
     htmlOptions?: HtmlExportOptions;
     fontFamily?: string;
     mermaidFontSize?: number;
     remoteImagesEnabled?: boolean;
     renderFormat?: 'markdown' | 'mixed' | 'textile';
     configPath?: string;
+    /** `--no-config`の指定。trueなら設定ファイルを自動検出しない。 */
+    noConfig?: boolean;
+    /** `--watch`の指定。trueなら初回の変換後も入力の変更を監視し、変わった入力だけを変換し直す。 */
+    watch?: boolean;
     signal?: AbortSignal;
 }
 
 /** CLIバンドル用に複製したレンダラーと印刷素材を格納するディレクトリ。 */
 const assetDir = __dirname;
 /** 受け付けるコマンドラインオプションと対応させるヘルプ文。 */
-const usage = `Usage: mve-convert INPUT.md --format html|pdf|docx [-o OUTPUT]
-       mve-convert INPUT.md "docs/**/*.md" --format html|pdf|docx --out-dir DIR
-       mve-convert - --format html|pdf|docx [-o OUTPUT] < INPUT.md
+const usage = `Usage: mve-convert INPUT.md --format html|pdf|docx|md|textile [-o OUTPUT]
+       mve-convert INPUT.md "docs/**/*.md" --format html|pdf|docx|md|textile --out-dir DIR
+       mve-convert - --format html|pdf|docx|md|textile [-o OUTPUT] < INPUT.md
   INPUT                   File, wildcard pattern (*, ?, **), or - for stdin
-  --format html|pdf|docx  Output format; optional when -o ends in .html, .htm, .pdf, or .docx
-  -o, --output PATH       Output file (default: INPUT.html, .pdf, or .docx); - for stdout
+  --format FORMAT         html, pdf, docx, or md / textile to rewrite the syntax;
+                          optional when -o ends in .html, .htm, .pdf, .docx, .md, .markdown, or .textile
+  -o, --output PATH       Output file (default: INPUT with the format's extension); - for stdout
+  --watch                 Convert again whenever an input file changes (Ctrl+C to stop)
   --out-dir PATH          Output directory for one or more inputs
   --base-dir PATH         Base directory for relative links when reading stdin
   --title TEXT            Document title (single input)
@@ -115,7 +142,8 @@ const usage = `Usage: mve-convert INPUT.md --format html|pdf|docx [-o OUTPUT]
   --front-matter MODE     auto removes YAML front matter, render keeps it (default: auto)
   --browser-timeout SEC   Browser startup timeout (default: 5)
   --render-timeout SEC    PDF/DOCX generation timeout (default: 60)
-  --config PATH           JSON export settings
+  --config PATH           JSON export settings (default: nearest ${DEFAULT_CONFIG_FILE_NAME})
+  --no-config             Do not look for ${DEFAULT_CONFIG_FILE_NAME}
   --force                 Overwrite existing output files
   --html-embed-images     Embed local images in HTML
   --workspace-root PATH   Workspace root for root-relative Markdown links
@@ -183,8 +211,12 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
     let outline = false;
     let force = false;
     let configPath: string | undefined;
+    let noConfig = false;
+    let watch = false;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
+        if (arg === '--no-config') { noConfig = true; continue; }
+        if (arg === '--watch') { watch = true; continue; }
         if (arg === '--html-linked') { linked = true; continue; }
         if (arg === '--html-embed-images') { embedImages = true; continue; }
         if (arg === '--html-no-embed-images') { embedImages = false; continue; }
@@ -229,7 +261,9 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
                 renderTimeoutMs = parseTimeoutSeconds('render timeout', value);
                 break;
             case '--format':
-                if (value !== 'html' && value !== 'pdf' && value !== 'docx') throw new Error('Invalid format: ' + value);
+                if (value !== 'html' && value !== 'pdf' && value !== 'docx' && value !== 'md' && value !== 'textile') {
+                    throw new Error('Invalid format: ' + value);
+                }
                 format = value;
                 break;
             case '--config':
@@ -265,8 +299,10 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
         if (extension === '.html' || extension === '.htm') format = 'html';
         else if (extension === '.pdf') format = 'pdf';
         else if (extension === '.docx') format = 'docx';
+        else if (extension === '.md' || extension === '.markdown') format = 'md';
+        else if (extension === '.textile') format = 'textile';
     }
-    if (!format) throw new Error('--format html|pdf|docx is required.');
+    if (!format) throw new Error('--format html|pdf|docx|md|textile is required.');
     if (format !== 'html' && (linked || outline || argv.includes('--html-embed-images') || argv.includes('--html-no-embed-images'))) {
         throw new Error('--html-embed-images, --html-no-embed-images, --html-linked, and --html-outline are HTML-only options.');
     }
@@ -276,13 +312,18 @@ export function parseArguments(argv: readonly string[]): Arguments | undefined {
     // 入力がファイルでも`-o -`なら標準出力へ書く。標準入力は既定の出力先がないため標準出力へ書く。
     const stdout = output === '-' || (stdin && !output);
     if (stdout && json) throw new Error('Invalid output: --json cannot be combined with standard output.');
+    if (configPath && noConfig) throw new Error('Invalid configuration: --config and --no-config cannot be combined.');
+    // 監視は実ファイルの変更を待つため、標準入出力では成り立たない。--jsonは結果を1度だけ出す形式のため組み合わせない。
+    if (watch && (stdin || stdout)) throw new Error('Invalid --watch: it cannot be combined with standard input or output.');
+    if (watch && json) throw new Error('Invalid --watch: it cannot be combined with --json.');
     const virtualInput = path.join(baseDir ?? process.cwd(), 'stdin.md');
     return {
         input: stdin ? virtualInput : path.resolve(inputs[0]),
         inputPatterns: stdin ? undefined : inputs, stdin, stdout, outDir, title, strict, json,
         restrictLocalFiles, browserTimeoutMs, renderTimeoutMs, cssPaths, frontMatter,
         output: output && output !== '-' ? path.resolve(output) : undefined, format,
-        language, browserPath, workspaceRoot, theme, mermaidTheme, linked, embedImages, outline, force, configPath
+        language, browserPath, workspaceRoot, theme, mermaidTheme, linked, embedImages, outline, force, configPath,
+        noConfig, watch
     };
 }
 
@@ -350,15 +391,59 @@ function validateExportConfig(pdf: unknown, html: unknown): void {
 }
 
 /**
+ * `--config`がないときに使う設定ファイルを、開始ディレクトリから親へ向かって探す。
+ * 入力ごとではなくカレントディレクトリを基準にするのは、設定が実行全体（全入力）に1つだけ適用されるため。
+ * @param start - 探索を始めるディレクトリ（カレントディレクトリ）。
+ * @returns 最も近い`mve-convert.json`の絶対パス。ルートまで見つからなければundefined。
+ * @throws 読み取り権限がないなど、ENOENT・ENOTDIR以外で存在を確認できない場合はエラーを伝播する（黙って既定値で変換しない）。
+ */
+async function findConfigFile(start: string): Promise<string | undefined> {
+    for (let directory = path.resolve(start); ; directory = path.dirname(directory)) {
+        const candidate = path.join(directory, DEFAULT_CONFIG_FILE_NAME);
+        try {
+            // 同名のディレクトリは設定ファイルではないため読み飛ばし、さらに親を探す。
+            if ((await fs.stat(candidate)).isFile()) return candidate;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+        }
+        if (path.dirname(directory) === directory) return undefined;
+    }
+}
+
+/**
  * Resolve JSON settings before touching any output file.
+ * `--config`がなく`--no-config`もなければ、カレントディレクトリから親へ向かって`mve-convert.json`を探して使う。
  * JSON.parseはBOMを構文エラーとして扱うため、メモ帳などがBOM付きで保存した設定も読めるよう先に除去する。
  */
-async function loadConfig(args: Arguments, argv: readonly string[]): Promise<Arguments> {
-    if (!args.configPath) return args;
-    const base = path.dirname(args.configPath);
+async function loadConfig(parsed: Arguments, argv: readonly string[]): Promise<Arguments> {
+    if (parsed.configPath || parsed.noConfig) return readConfig(parsed, argv);
+    const found = await findConfigFile(process.cwd());
+    if (!found) return parsed;
+    try {
+        return await readConfig({ ...parsed, configPath: found }, argv);
+    } catch (error) {
+        // 利用者が指定していない設定ファイルの誤りは、どのファイルかを示さないと原因が分からないため場所を添える。
+        // 文言の先頭は変えず、終了コードの判定（exitCodeFor）を保つ。
+        if (error instanceof Error) error.message += ` (in ${found}; pass --no-config to ignore it)`;
+        throw error;
+    }
+}
+
+/**
+ * `args.configPath`の設定ファイルを読み、引数へ反映する。コマンドラインの指定が設定ファイルより優先する。
+ * @param args - 解析済みの引数。`configPath`がなければそのまま返す。
+ * @param argv - 指定の有無を判定する元の引数。
+ * @returns 設定を反映した変換要求。
+ * @throws 設定ファイルを読めない、JSONが壊れている、未知のキーや無効な値がある場合。
+ */
+async function readConfig(args: Arguments, argv: readonly string[]): Promise<Arguments> {
+    const configPath = args.configPath;
+    if (!configPath) return args;
+    const base = path.dirname(configPath);
     let raw: unknown;
     try {
-        raw = JSON.parse(stripUtf8Bom(await fs.readFile(args.configPath, 'utf8')));
+        raw = JSON.parse(stripUtf8Bom(await fs.readFile(configPath, 'utf8')));
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code) throw error;
         throw new Error(`Invalid JSON configuration: ${error instanceof Error ? error.message : String(error)}`);
@@ -426,6 +511,7 @@ async function loadConfig(args: Arguments, argv: readonly string[]): Promise<Arg
         browserPath: argv.includes('--browser') ? args.browserPath : config.browserPath ? path.resolve(base, config.browserPath) : args.browserPath,
         workspaceRoot: argv.includes('--workspace-root') ? args.workspaceRoot : config.workspaceRoot ? path.resolve(base, config.workspaceRoot) : args.workspaceRoot,
         pdfOptions: pdf ? normalizePdfOptions(pdf) : undefined,
+        pdfConfig: pdf ? pdf as Record<string, unknown> : undefined,
         htmlOptions: html ? normalizeHtmlExportSettings(html) : undefined,
         linked: argv.includes('--html-linked') ? true : html ? Boolean((html as Record<string, unknown>).convertLinkedMarkdown) : args.linked,
         // 画像フラグはJSONより優先し、両方指定された場合は引数解析で最後に読んだ値を使う。
@@ -433,6 +519,39 @@ async function loadConfig(args: Arguments, argv: readonly string[]): Promise<Arg
             ? args.embedImages : html ? Boolean((html as Record<string, unknown>).embedImages) : args.embedImages,
         outline: argv.includes('--html-outline') ? true : html ? Boolean((html as Record<string, unknown>).showOutlineSidebar) : args.outline
     };
+}
+
+/**
+ * front matterの`mve-convert`（文書ごとの出力設定）を検証し、設定ファイルの`pdf`へ項目単位で重ねる。
+ * 優先順位は front matter > 設定ファイル > 既定値。`margins`と`headingFontSizes`は中の項目ごとに重ね、
+ * `textReplacements`などの配列は front matter の値で置き換える。
+ * 文書の誤記で黙って既定値に戻らないよう、設定ファイルと同じ検証（未知のキー・型・用紙サイズ）を行う。
+ * @param args - 設定ファイルの`pdf`（正規化前・正規化後）を持つ変換要求。
+ * @param exportSettings - front matterの`mve-convert`の値。キーがなければundefined。
+ * @returns この文書に使うPDF設定。重ねる値がなければ`args.pdfOptions`をそのまま返す（従来どおり）。
+ * @throws 値が無効な場合。先頭の`Invalid`により単一入力では設定ファイルの誤りと同じ終了コード2になり、
+ *   一括変換ではこの入力だけを失敗として他の入力を続ける（終了コード1）。
+ */
+function resolveDocumentPdfOptions(args: Arguments, exportSettings: unknown): PdfOptions | undefined {
+    if (exportSettings === undefined) return args.pdfOptions;
+    let override: Record<string, unknown> | undefined;
+    try {
+        const settings = validateFields(FRONT_MATTER_SETTINGS_KEY, exportSettings, { pdf: () => true });
+        if (settings.pdf !== undefined) {
+            if (!settings.pdf || typeof settings.pdf !== 'object' || Array.isArray(settings.pdf)) throw new Error('pdf must be an object.');
+            validateExportConfig(settings.pdf, undefined);
+            override = settings.pdf as Record<string, unknown>;
+        }
+    } catch (error) {
+        throw new Error(`Invalid front matter ${FRONT_MATTER_SETTINGS_KEY}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!override) return args.pdfOptions;
+    const base = args.pdfConfig ?? {};
+    const merged: Record<string, unknown> = { ...base, ...override };
+    for (const key of ['margins', 'headingFontSizes']) {
+        if (base[key] && override[key]) merged[key] = { ...base[key] as object, ...override[key] as object };
+    }
+    return normalizePdfOptions(merged);
 }
 
 /** Mermaid図の画像参照では、ワークスペース内に存在する実ファイルだけを読み込む。 */
@@ -852,6 +971,8 @@ async function convertExclusive(args: Arguments): Promise<readonly string[]> {
         const inputStat = await fs.stat(args.input);
         if (!inputStat.isFile()) throw new Error('Input must be a file.');
     }
+    // 同じ記法への変換は既定の出力先が入力と同じになるため、出力先の検査より前に、理由が分かる文言で止める。
+    const syntax = isSyntaxFormat(args.format) ? syntaxConversionFor(args) : undefined;
     const output = plannedOutput(args);
     // 標準出力では出力パスは相対リンクの基準に使うだけで、実ファイルへの衝突は起きない。
     if (!args.stdout) await assertDistinctFiles([args.input], [output]);
@@ -863,6 +984,7 @@ async function convertExclusive(args: Arguments): Promise<readonly string[]> {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         }
     }
+    if (syntax) return convertSyntaxFile(args, syntax, output);
     let context: BrowserContext | undefined;
     /** 中断中のブラウザー評価を止め、finally で残りの資源を解放する。 */
     const abortContext = () => { void context?.close().catch(() => undefined); };
@@ -882,12 +1004,14 @@ async function convertExclusive(args: Arguments): Promise<readonly string[]> {
         await page.addScriptTag({ path: path.join(assetDir, 'markdown-fallback.js') });
         const markdown = stripUtf8Bom(args.markdown ?? await fs.readFile(args.input, 'utf8'));
         const metadata = extractDocumentMetadata(markdown, resolveRenderFormat(args.input, args.renderFormat), args.frontMatter);
+        // front matterの`mve-convert.pdf`で、この文書だけ用紙・余白などを上書きする。
+        // 無効な値で描画（Mermaidなど時間のかかる処理）を始めないよう、描画より前に検証する。
+        const replacementOptions = resolveDocumentPdfOptions(args, metadata.exportSettings) ?? DEFAULT_PDF_OPTIONS;
         const marp = args.format === 'pdf' && hasMarpFrontMatterCandidate(markdown)
             && isMarpMarkdown(markdown, parseMarpFrontMatter);
         // Marp CoreはスライドのディレクティブとしてFront matterを解釈するため、除去前の原文を渡す。
         const marpContent = marp ? await renderMarpPdf(page, markdown, args.input, args) : undefined;
         const renderedHtml = marpContent?.html ?? await renderMarkdownFile(page, metadata.body, args.input, args);
-        const replacementOptions = args.pdfOptions ?? DEFAULT_PDF_OPTIONS;
         const explicitTitle = args.title ?? metadata.frontMatterTitle;
         const title = chooseDocumentTitle(explicitTitle,
             explicitTitle === undefined ? await readFirstHeading(page, renderedHtml) : undefined, args.input);
@@ -1013,6 +1137,63 @@ async function convertExclusive(args: Arguments): Promise<readonly string[]> {
         await context?.close().catch(() => undefined);
         if (!args.keepResources) await closeConversionResources();
     }
+}
+
+/** `--format md|textile`で書き換える記法の向き。 */
+interface SyntaxConversion {
+    /** 入力の記法。描画形式の判定（拡張子と`rendering.renderFormat`）に従う。 */
+    from: DocumentSyntax;
+    /** 出力の記法。 */
+    to: DocumentSyntax;
+}
+
+/**
+ * 入力の記法と出力形式から、書き換えの向きを決める。
+ * 入力の記法は描画と同じ判定を使う（`.textile`はTextile、それ以外と標準入力はMarkdown。`rendering.renderFormat`が優先）。
+ * `mixed`はMarkdownとして扱う（Textileの記法も許すMarkdown文書のため）。
+ * @param args - 入力パス、描画形式の指定、出力形式を持つ変換要求。
+ * @returns 書き換えの向き。
+ * @throws 入力がすでに出力の記法である場合。先頭の`Invalid`により単一入力では終了コード2になる。
+ */
+function syntaxConversionFor(args: Pick<Arguments, 'input' | 'renderFormat' | 'format'>): SyntaxConversion {
+    const from: DocumentSyntax = resolveRenderFormat(args.input, args.renderFormat) === 'textile' ? 'textile' : 'markdown';
+    const to: DocumentSyntax = args.format === 'textile' ? 'textile' : 'markdown';
+    if (from === to) {
+        const name = to === 'markdown' ? 'Markdown' : 'Textile';
+        throw new Error(`Invalid input: ${args.input} is already ${name}; use --format ${to === 'markdown' ? 'textile' : 'md'} to convert it.`);
+    }
+    return { from, to };
+}
+
+/**
+ * 原文の記法をMarkdown⇔Textileで書き換えて保存する。ブラウザーは起動しない。
+ * 変換器は改行コードと末尾改行の有無を保つ。BOMは入力にあった場合だけ出力にも付け、エディターでの文字コード判定を変えない。
+ * 変換先に同じ意味の記法がない行は、変換を止めずに最も近い書き方で書き、行番号を警告する（`--strict`では終了コード1）。
+ * @param args - 検証済みの変換要求。出力先の衝突と上書きの可否は呼び出し側で確認済み。
+ * @param syntax - 書き換えの向き。
+ * @param output - 出力先。標準出力へ書く場合は使わない。
+ * @returns 書き込んだ出力パス。標準出力へ書いた場合は空。
+ */
+async function convertSyntaxFile(args: Arguments, syntax: SyntaxConversion, output: string): Promise<readonly string[]> {
+    const raw = args.markdown ?? await fs.readFile(args.input, 'utf8');
+    const bom = raw.charCodeAt(0) === 0xfeff ? String.fromCharCode(0xfeff) : '';
+    const result = convertDocumentSyntax(stripUtf8Bom(raw), syntax.from, syntax.to);
+    if (result.unsupportedLines.length) {
+        const lines = result.unsupportedLines;
+        // 行が多い文書でも警告が1行に収まるよう、先頭の20行だけを示す。
+        const shown = lines.slice(0, 20).join(', ') + (lines.length > 20 ? `, and ${lines.length - 20} more` : '');
+        (args.onWarning ?? console.warn)(`Line(s) ${shown} use syntax that has no exact equivalent and may render differently after conversion.`);
+    }
+    args.signal?.throwIfAborted();
+    const text = bom + result.text;
+    if (args.stdout) {
+        await writeStdout(text);
+        return [];
+    }
+    await fs.mkdir(path.dirname(output), { recursive: true });
+    await fs.writeFile(output, text, { encoding: 'utf8', flag: args.force ? 'w' : 'wx', signal: args.signal });
+    args.signal?.throwIfAborted();
+    return [output];
 }
 
 /** 変換で共有するMermaid描画ページとブラウザーを閉じる。未起動の場合は何もしない。 */
@@ -1164,19 +1345,26 @@ function assertInputCombination(args: Arguments, inputs: readonly string[]): voi
  * @param bases - `--out-dir`内の相対位置の基準にする、入力指定ごとのディレクトリ。
  * @param signal - 中断の通知。中断後は残りの入力を処理しない。
  * @param records - 処理した入力の結果を追加する配列。例外時も途中までの結果を残すため呼び出し側が所有する。
- * @throws 単一入力の失敗と中断は例外を伝播し、従来の文言と終了コードを保つ。
+ * @param watch - `--watch`の状態。指定時は失敗しても例外を伝播せず次の入力へ進み、ブラウザーを閉じずに残す
+ *   （監視の終了時に呼び出し側が閉じる）。
+ * @throws 監視なしの単一入力の失敗と中断は例外を伝播し、従来の文言と終了コードを保つ。
  */
 async function convertAll(
-    args: Arguments, inputs: readonly string[], bases: readonly string[], signal: AbortSignal, records: ConversionRecord[]
+    args: Arguments, inputs: readonly string[], bases: readonly string[], signal: AbortSignal, records: ConversionRecord[],
+    watch?: WatchState
 ): Promise<void> {
-    const batch = inputs.length > 1;
+    // 監視中の再変換は変わった入力だけを渡すため、表示の形式と重複検査は監視対象の全入力で決める。
+    const allInputs = watch?.inputs ?? inputs;
+    const batch = allInputs.length > 1;
     const extension = '.' + args.format;
     const base = args.outDir ? commonDirectory(bases) : undefined;
     /** 入力ごとの明示的な出力先を返す。未指定なら入力の隣へ出力する既定の動作に任せる。 */
     const outputFor = (input: string): string | undefined =>
         args.outDir && base ? outputPathInDirectory(base, input, args.outDir, extension) : args.output;
-    // 出力の重複（a.mdとa.textileなど）は1件も書き込む前に拒否する。
-    if (batch) await assertDistinctFiles(inputs, inputs.map((input) => plannedOutput({ ...args, input, output: outputFor(input) })));
+    // 出力の重複（a.mdとa.textileなど）は1件も書き込む前に拒否する。監視中の再変換では初回に検査済み。
+    if (batch && !watch?.started) {
+        await assertDistinctFiles(allInputs, allInputs.map((input) => plannedOutput({ ...args, input, output: outputFor(input) })));
+    }
     try {
         for (const input of inputs) {
             const record: ConversionRecord = { input, outputs: [], warnings: [] };
@@ -1185,6 +1373,8 @@ async function convertAll(
             try {
                 record.outputs = await convert({
                     ...args, input, output: outputFor(input), signal, keepResources: true,
+                    // 監視中は、この実行で書き込んだ出力だけを上書きする。実行前からあった出力は--forceがなければ守る。
+                    force: args.force || watch?.written.has(input) === true,
                     /** 警告を入力ごとに記録し、複数入力ではどの文書の警告かを付けて表示する。 */
                     onWarning: (message) => {
                         record.warnings.push(message);
@@ -1192,20 +1382,121 @@ async function convertAll(
                     }
                 });
                 signal.throwIfAborted();
+                // 標準出力へ書いた変換（outputsが空）は、上書きの対象となる出力ファイルがない。
+                if (record.outputs.length) watch?.written.add(input);
                 if (!args.json) for (const file of record.outputs) process.stdout.write(file + '\n');
             } catch (error) {
                 record.error = signal.aborted ? INTERRUPTED_MESSAGE : formatCliError(error);
-                if (!batch || signal.aborted) throw error;
+                if ((!batch && !watch) || signal.aborted) throw error;
                 process.stderr.write(label + record.error + '\n');
                 await closeConversionResources();
             }
         }
     } finally {
+        if (!watch) await closeConversionResources();
+    }
+}
+
+/** `--watch`の実行全体で共有する状態。 */
+interface WatchState {
+    /** 監視対象の全入力（展開済みの絶対パス）。 */
+    inputs: readonly string[];
+    /**
+     * この実行で出力を書き込んだ入力。再変換ではこれらの出力だけを`--force`なしでも上書きする。
+     * 実行前からあった出力を、監視を理由に黙って上書きしないため。
+     */
+    written: Set<string>;
+    /** 初回の変換を終えたらtrue。再変換では出力先の重複検査を繰り返さない。 */
+    started: boolean;
+}
+
+/** 保存の直後に続けて届く変更通知（エディターの一時ファイル経由の保存など）を1回の変換にまとめる待ち時間（ミリ秒）。 */
+const WATCH_DEBOUNCE_MS = 200;
+
+/**
+ * Windowsでは大文字と小文字を区別せずにパスを比べる。監視の通知と入力のパスで表記が違っても同じ入力とみなすため。
+ * @param value - 絶対パス。
+ * @returns 比較用のキー。
+ */
+function watchKey(value: string): string {
+    return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+/**
+ * 入力ファイルの変更を監視し、変わった入力だけを変換し直す。中断（Ctrl+C）まで戻らない。
+ * ファイルではなく親ディレクトリを監視するのは、保存時にファイルを置き換えるエディター（一時ファイルからの名前変更）でも
+ * 監視が外れないようにするため。通知はファイル名で入力と照合し、出力ファイルなど入力以外の変更は無視する。
+ * 変換中に届いた変更は、その変換の後にまとめて変換し直す（同じ入力を並行して変換しない）。
+ * 監視するのは展開済みの入力だけで、リンク先の文書・画像・CSS・設定ファイル、新しく作られたファイルは対象外。
+ * @param args - 初回の変換と同じ変換要求。
+ * @param bases - `--out-dir`内の相対位置の基準。初回と同じ値を使い、出力先を変えない。
+ * @param signal - 中断の通知。中断されたら監視を外し、実行中の変換の終了を待ってから戻る。
+ * @param state - 初回の変換と共有する状態。
+ */
+async function watchInputs(
+    args: Arguments, bases: readonly string[], signal: AbortSignal, state: WatchState
+): Promise<void> {
+    const byKey = new Map(state.inputs.map((input) => [watchKey(input), input]));
+    const directories = [...new Set(state.inputs.map((input) => path.dirname(input)))];
+    const pending = new Set<string>();
+    let timer: NodeJS.Timeout | undefined;
+    let running: Promise<void> | undefined;
+    /** 待っている入力をまとめて変換する。実行中なら終了後にもう一度呼ばれる。 */
+    const flush = (): void => {
+        timer = undefined;
+        if (running || !pending.size || signal.aborted) return;
+        const inputs = state.inputs.filter((input) => pending.has(input));
+        pending.clear();
+        running = convertAll(args, inputs, bases, signal, [], state)
+            // 中断で伝播した例外は監視の終了として扱う。それ以外の失敗はconvertAllが入力ごとに報告済み。
+            .catch(() => undefined)
+            .finally(() => {
+                running = undefined;
+                if (pending.size) schedule();
+            });
+    };
+    /** 連続した通知を待ち時間でまとめてから変換する。 */
+    const schedule = (): void => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(flush, WATCH_DEBOUNCE_MS);
+    };
+    const watchers = directories.map((directory) => {
+        const watcher = watchDirectory(directory, { persistent: true }, (_event, filename) => {
+            if (filename === null) {
+                // ファイル名を通知しない環境では、このディレクトリの入力をすべて変換し直す。
+                for (const input of state.inputs) if (path.dirname(input) === directory) pending.add(input);
+            } else {
+                const input = byKey.get(watchKey(path.join(directory, filename.toString())));
+                if (!input) return;
+                pending.add(input);
+            }
+            schedule();
+        });
+        // ディレクトリの削除などで監視できなくなっても、他のディレクトリの監視は続ける。
+        watcher.on('error', (error) => {
+            process.stderr.write(`Stopped watching ${directory}: ${formatCliError(error)}\n`);
+            watcher.close();
+        });
+        return watcher;
+    });
+    process.stderr.write(`Watching ${state.inputs.length} file(s) for changes. Press Ctrl+C to stop.\n`);
+    try {
+        await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+    } finally {
+        if (timer) clearTimeout(timer);
+        for (const watcher of watchers) watcher.close();
+        await running;
         await closeConversionResources();
     }
 }
 
-/** CLIを実行し、引数・設定エラーを2、変換エラーと--strictの警告を1、中断を130の終了コードへ変換する。 */
+/**
+ * CLIを実行し、引数・設定エラーを2、変換エラーと--strictの警告を1、中断を130の終了コードへ変換する。
+ * `--watch`では初回の変換の失敗で終了せず監視を続け、Ctrl+Cで終えたときに130で終了する。
+ */
 async function main(): Promise<void> {
     const controller = new AbortController();
     const argv = process.argv.slice(2);
@@ -1264,7 +1555,13 @@ async function main(): Promise<void> {
         assertInputCombination(args, inputs);
         const customCss = await readCustomCss(args.cssPaths);
         const markdown = args.stdin ? await readStdin(controller.signal) : undefined;
-        await convertAll({ ...args, customCss, markdown }, inputs, bases, controller.signal, records);
+        const watch: WatchState | undefined = args.watch ? { inputs, written: new Set(), started: false } : undefined;
+        await convertAll({ ...args, customCss, markdown }, inputs, bases, controller.signal, records, watch);
+        if (watch) {
+            watch.started = true;
+            // 監視はCtrl+Cで終えるため、ここから戻るのは中断時だけ（終了コード130）。
+            await watchInputs({ ...args, customCss }, bases, controller.signal, watch);
+        }
         const warnings = records.reduce((count, record) => count + record.warnings.length, 0);
         if (records.some((record) => record.error)) process.exitCode = 1;
         if (args.strict && warnings > 0) {
