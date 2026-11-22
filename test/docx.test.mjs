@@ -78,13 +78,16 @@ function readZip(zip) {
 
 /**
  * DOCXを変換して、パッケージの各パーツを返す。
+ * ブラウザー起動の待ち時間は30秒にする。CLIの既定（5秒）では、macOSのCIランナーで最初のChrome起動が間に合わず、
+ * DOCXの検証と無関係な理由で失敗したため。起動の失敗そのものは別のテスト（--browser-timeout）で検証する。
  * @param {string} input - 入力Markdown。
  * @param {string} output - 出力DOCX。
  * @param {string[]} [extra] - 追加の引数。
  * @returns {Promise<{parts: Map<string, Buffer>, stderr: string, bytes: Buffer}>} パーツ、標準エラー、ファイルの内容。
  */
 async function convertDocx(input, output, extra = []) {
-  const result = await execute(process.execPath, [cli, input, '--format', 'docx', '--output', output, '--browser', browserPath, ...extra]);
+  const result = await execute(process.execPath, [cli, input, '--format', 'docx', '--output', output, '--browser', browserPath,
+    '--browser-timeout', '30', ...extra]);
   const bytes = await readFile(output);
   return { parts: readZip(bytes), stderr: result.stderr, bytes };
 }
