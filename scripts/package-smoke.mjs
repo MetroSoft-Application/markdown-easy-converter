@@ -178,7 +178,8 @@ async function main() {
     await writeFile(child, '# Linked page\n');
     await writeFile(image, '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
     const output = path.join(project, 'generated', 'document.html');
-    await runCli(cli, [source, '--format', 'html', '--output', output, '--browser', browser,
+    // CI では最初に起動するブラウザーになり、初回の起動は既定の待ち時間（5秒）を超えることがあるため、30秒待つ。
+    await runCli(cli, [source, '--format', 'html', '--output', output, '--browser', browser, '--browser-timeout', '30',
       '--html-linked', '--html-embed-images', '--html-outline']);
     const html = await readFile(output, 'utf8');
     assert.match(html, /Package smoke/);
@@ -196,7 +197,7 @@ async function main() {
     const marp = path.join(project, 'slides.md');
     await writeFile(marp, '---\nmarp: true\n---\n\n# Slide\n');
     const pdfDirectory = path.join(project, 'generated', 'pdf');
-    await runCli(cli, [source, marp, '--format', 'pdf', '--out-dir', pdfDirectory, '--browser', browser]);
+    await runCli(cli, [source, marp, '--format', 'pdf', '--out-dir', pdfDirectory, '--browser', browser, '--browser-timeout', '30']);
     for (const name of ['document.pdf', 'slides.pdf']) {
       assert.equal((await readFile(path.join(pdfDirectory, name))).toString('ascii', 0, 5), '%PDF-', name);
     }
