@@ -1,6 +1,7 @@
 /**
  * @fileoverview CLI の描画テストで使う Chromium 系ブラウザーを検出する。
- * CI は playwright-core が導入した Chromium を使用し、ローカルでは Edge / Chrome も使用できる。
+ * CI は MVE_TEST_BROWSER でランナーにあらかじめ入っている Google Chrome を指定する。指定がなければ playwright-core が導入した
+ * Chromium、Windows の Edge / Chrome の順に探す。
  */
 import { existsSync } from 'node:fs';
 import path from 'node:path';

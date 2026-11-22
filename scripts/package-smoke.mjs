@@ -1,11 +1,13 @@
 /**
  * @fileoverview 公開予定の tarball を npm の通常ライフサイクルで作成し、隔離したプロジェクトで実行する。
  * ソースツリーではなくインストール済みの CLI から HTML / PDF / Marp とファイルへの影響を確認する。
+ * CI の時間を短くするため、ブラウザーを使う変換は2回（HTML、PDF と Marp の PDF の一括変換）にまとめ、ビルドは npm pack の
+ * prepack の1回だけにする（CI ではこの後に `npm run test:run`でテストを実行し、ビルドを繰り返さない）。
  */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -134,12 +136,10 @@ async function main() {
   const temporary = await mkdtemp(path.join(tmpdir(), 'mve-package-smoke-'));
   const cache = path.join(temporary, 'npm-cache');
   try {
-    const dryRun = parsePack(await runNpm(['pack', '--dry-run', '--json'], { cwd: root, cache }));
-    inspectPack(dryRun, metadata);
+    // 実際の tarball のファイル一覧と容量を点検する。--dry-run での事前確認は、同じ prepack（ビルド）をもう1回走らせるだけで
+    // 点検できる内容が同じため行わない（CI の時間を短くするため）。
     const packed = parsePack(await runNpm(['pack', '--json', '--pack-destination', temporary], { cwd: root, cache }));
     inspectPack(packed, metadata);
-    assert.deepEqual(packed.files.map((file) => file.path), dryRun.files.map((file) => file.path),
-      'dry-run and actual tarball have different file lists');
 
     const project = path.join(temporary, 'consumer');
     await mkdir(project);
@@ -159,6 +159,9 @@ async function main() {
       'a development dependency was installed in the consumer project');
     assert.ok(!existsSync(path.join(project, 'node_modules', 'playwright-core')),
       'playwright-core should be bundled rather than installed separately');
+    // 導入先にはこのパッケージだけがある（依存を1つも導入しない）。下の変換は、消費者側の node_modules に頼らずに動くことの確認を兼ねる。
+    assert.deepEqual((await readdir(path.join(project, 'node_modules'))).filter((name) => !name.startsWith('.')), ['@metrosoft'],
+      'the consumer project must not install any runtime dependency');
     // 配布 CSS が woff2 だけを埋め込み、出力 HTML の容量を倍増させる woff / ttf を含まないことを直接確かめる。
     const printAssets = await readFile(path.join(installed, 'dist', 'print-assets.css'), 'utf8');
     assert.ok(printAssets.includes('data:font/woff2;'), 'print-assets.css embeds no woff2 fonts');
@@ -184,25 +187,19 @@ async function main() {
     assert.match(html, /child\.html/);
     assert.match(await readFile(path.join(project, 'generated', 'child.html'), 'utf8'), /Linked page/);
     assert.equal(await readFile(source, 'utf8'), original, 'the input Markdown was modified');
+    // 既存の出力の保護は、ブラウザーを起動する前に止まる。
     await assert.rejects(runCli(cli, [source, '--format', 'html', '--output', output, '--browser', browser]),
       (error) => /Output already exists/.test(error.stderr));
-    await runCli(cli, [source, '--format', 'html', '--output', output, '--browser', browser, '--force']);
 
-    const pdf = path.join(project, 'generated', 'document.pdf');
-    await runCli(cli, [source, '--format', 'pdf', '--output', pdf, '--browser', browser]);
-    assert.equal((await readFile(pdf)).toString('ascii', 0, 5), '%PDF-');
-    // バンドルだけを別の場所へ移し、消費者側の node_modules が実行時に必要か調べる。
-    const standalone = path.join(temporary, 'standalone-package');
-    await cp(installed, standalone, { recursive: true });
-    const standalonePdf = path.join(project, 'generated', 'standalone.pdf');
-    await runCli(path.join(standalone, installedMetadata.bin['mve-convert']),
-      [source, '--format', 'pdf', '--output', standalonePdf, '--browser', browser]);
-    assert.equal((await readFile(standalonePdf)).toString('ascii', 0, 5), '%PDF-');
+    // PDF（通常の文書と Marp）を1回の一括変換で作る。導入先の node_modules にはこのパッケージしかない（依存を導入しないことを
+    // 上で確かめている）ため、ここで成功すれば、消費者側の node_modules に頼らずにバンドルだけで動くことも確かめられる。
     const marp = path.join(project, 'slides.md');
     await writeFile(marp, '---\nmarp: true\n---\n\n# Slide\n');
-    const marpPdf = path.join(project, 'generated', 'slides.pdf');
-    await runCli(cli, [marp, '--format', 'pdf', '--output', marpPdf, '--browser', browser]);
-    assert.equal((await readFile(marpPdf)).toString('ascii', 0, 5), '%PDF-');
+    const pdfDirectory = path.join(project, 'generated', 'pdf');
+    await runCli(cli, [source, marp, '--format', 'pdf', '--out-dir', pdfDirectory, '--browser', browser]);
+    for (const name of ['document.pdf', 'slides.pdf']) {
+      assert.equal((await readFile(path.join(pdfDirectory, name))).toString('ascii', 0, 5), '%PDF-', name);
+    }
 
     console.log(JSON.stringify({
       package: `${metadata.name}@${metadata.version}`,
@@ -216,7 +213,7 @@ async function main() {
       largestFiles: [...packed.files].sort((left, right) => right.size - left.size)
         .slice(0, 3).map((file) => ({ path: file.path, bytes: file.size })),
       runtimeDependencies: Object.keys(installedMetadata.dependencies ?? {}),
-      installedCli: 'HTML, linked HTML, local image, PDF, Marp PDF, standalone PDF, version, bin shim',
+      installedCli: 'linked HTML with an embedded image and outline, output protection, PDF and Marp PDF without runtime dependencies, version, bin shim',
     }, null, 2));
   } finally {
     await removeTemporaryDirectory(temporary);

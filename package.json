@@ -61,7 +61,8 @@
     "build": "node build.mjs",
     "prepack": "npm run build",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/cli.test.mjs test/print-assets.test.mjs test/docx.test.mjs test/merge.test.mjs",
+    "test": "npm run build && npm run test:run",
+    "test:run": "node --test test/cli.test.mjs test/html.test.mjs test/pdf.test.mjs test/docx.test.mjs test/merge.test.mjs test/print-assets.test.mjs",
     "test:package": "node scripts/package-smoke.mjs"
   }
 }
