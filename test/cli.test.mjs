@@ -1401,12 +1401,15 @@ test('mve-convert.json is found from the current directory upward unless --no-co
     await writeFile(input, 'h1. Title\n');
     const found = path.join(directory, 'mve-convert.json');
     await writeFile(found, JSON.stringify({ pdf: { format: 'Letter' } }));
-    // 子プロセスのカレントディレクトリはOSがシンボリックリンクを解決した実体のパスになる
-    // （macOSの一時フォルダ /var は /private/var へのリンク）。CLIはそこから探すため、期待値も実体のパスで比べる。
-    const foundRealPath = path.join(await realpath(directory), 'mve-convert.json');
+    // エラー文のパスの表記はOSで変わる（macOSは /var のリンクを解決した /private/var、Windowsのランナーは
+    // RUNNER~1 のような8.3形式の短い名前のまま）。文字列ではなく、両方の実体のパスが同じファイルかで比べる。
+    let reported;
     await assert.rejects(execute(process.execPath, [cli, input, '--format', 'md'], { cwd: nested }),
-      (error) => error.code === 2 && /^Invalid pdf\.format\./m.test(error.stderr)
-        && error.stderr.includes(`(in ${foundRealPath}; pass --no-config to ignore it)`));
+      (error) => {
+        reported = /\(in (.+); pass --no-config to ignore it\)/.exec(error.stderr)?.[1];
+        return error.code === 2 && /^Invalid pdf\.format\./m.test(error.stderr) && reported !== undefined;
+      });
+    assert.equal(await realpath(reported), await realpath(found));
     const ignored = await execute(process.execPath, [cli, input, '--format', 'md', '--no-config'], { cwd: nested });
     assert.equal(ignored.stdout.trim(), path.join(nested, 'doc.md'));
     // --config の指定が自動検出より優先する。
