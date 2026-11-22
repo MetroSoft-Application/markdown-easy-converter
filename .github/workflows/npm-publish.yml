@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 3 ジョブの OS 別検査より前に、タグと package.json の版の不一致を安価に検出する。
+  # 2 ジョブの OS 別検査より前に、タグと package.json の版の不一致を安価に検出する。
   verify-tag:
     runs-on: ubuntu-latest
     steps:
