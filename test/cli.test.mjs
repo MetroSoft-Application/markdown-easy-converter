@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1401,9 +1401,12 @@ test('mve-convert.json is found from the current directory upward unless --no-co
     await writeFile(input, 'h1. Title\n');
     const found = path.join(directory, 'mve-convert.json');
     await writeFile(found, JSON.stringify({ pdf: { format: 'Letter' } }));
+    // 子プロセスのカレントディレクトリはOSがシンボリックリンクを解決した実体のパスになる
+    // （macOSの一時フォルダ /var は /private/var へのリンク）。CLIはそこから探すため、期待値も実体のパスで比べる。
+    const foundRealPath = path.join(await realpath(directory), 'mve-convert.json');
     await assert.rejects(execute(process.execPath, [cli, input, '--format', 'md'], { cwd: nested }),
       (error) => error.code === 2 && /^Invalid pdf\.format\./m.test(error.stderr)
-        && error.stderr.includes(`(in ${found}; pass --no-config to ignore it)`));
+        && error.stderr.includes(`(in ${foundRealPath}; pass --no-config to ignore it)`));
     const ignored = await execute(process.execPath, [cli, input, '--format', 'md', '--no-config'], { cwd: nested });
     assert.equal(ignored.stdout.trim(), path.join(nested, 'doc.md'));
     // --config の指定が自動検出より優先する。
