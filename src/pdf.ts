@@ -413,6 +413,7 @@ export async function withRenderControl<T>(
 
 /**
  * PlaywrightのPDF用ブラウザーコンテキストを閉じ、終了または上限時間まで待つ。
+ * 正常終了時は監視タイマーを解除し、CLIの終了を遅らせない。
  * @param context - 閉じるPDF用Playwright BrowserContext。
  */
 export async function closePdfContext(context: BrowserContext): Promise<void> {
@@ -421,15 +422,20 @@ export async function closePdfContext(context: BrowserContext): Promise<void> {
         * コンテキストの終了失敗を無視し、終了待ちの上限時間を適用する。
          */
         () => undefined);
-    await Promise.race([
-        close,
-        new Promise<void>(
-            /**
-             * 遅延処理の完了または失敗を待機側へ通知する。
-             * @param resolve - Promiseの成功を通知する関数。
-             */
-            (resolve) => setTimeout(resolve, PDF_CONTEXT_CLOSE_TIMEOUT_MS))
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([
+            close,
+            new Promise<void>(
+                /**
+                 * 終了処理が上限時間を超えたときだけ待機側へ通知する。
+                 * @param resolve - Promiseの成功を通知する関数。
+                 */
+                (resolve) => { timer = setTimeout(resolve, PDF_CONTEXT_CLOSE_TIMEOUT_MS); })
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 /**

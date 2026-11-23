@@ -18,6 +18,54 @@ const redFill = /(?:^|\s)1 0 0 rg\b/;
 
 describe('pdf', { concurrency }, () => {
   /**
+   * PDFとDOCXの正常終了時にコンテキスト終了の監視タイマーを残さない。
+   * 残ったタイマーは出力後もCLIの終了を2秒遅らせるため、子プロセス終了時のタイマー状態を検証する。
+   */
+  test('releases context close timers after PDF and DOCX output', needsBrowser, async () => {
+    await withDirectory(async (directory) => {
+      await writeFiles(directory, {
+        'input.md': '# Timer cleanup\n',
+        'track-timers.cjs': [
+          "const fs = require('node:fs');",
+          'const pending = new Set();',
+          'let created = 0;',
+          'let cleared = 0;',
+          'let fired = 0;',
+          'const originalSet = globalThis.setTimeout;',
+          'const originalClear = globalThis.clearTimeout;',
+          'globalThis.setTimeout = function (callback, delay, ...rest) {',
+          "  const tracksCloseTimer = delay === 2000 && (new Error().stack || '').includes('closePdfContext');",
+          '  if (!tracksCloseTimer) return originalSet(callback, delay, ...rest);',
+          '  let handle;',
+          '  const trackedCallback = (...args) => {',
+          '    if (pending.delete(handle)) fired++;',
+          '    return callback(...args);',
+          '  };',
+          '  handle = originalSet(trackedCallback, delay, ...rest);',
+          '  created++;',
+          '  pending.add(handle);',
+          '  return handle;',
+          '};',
+          'globalThis.clearTimeout = function (handle) { if (pending.delete(handle)) cleared++; return originalClear(handle); };',
+          "process.on('exit', () => fs.writeFileSync(process.argv[process.argv.indexOf('--format') + 1] + '-timers.json', JSON.stringify({ created, cleared, fired, pending: pending.size })));"
+        ].join('\n')
+      });
+      for (const format of ['pdf', 'docx']) {
+        const report = path.join(directory, `${format}-timers.json`);
+        const result = await run(['input.md', '--format', format, '--out-dir', format, '--no-config'], {
+          cwd: directory, node: ['--require', path.join(directory, 'track-timers.cjs')]
+        });
+        assert.equal(result.code, 0, result.stderr);
+        const timers = JSON.parse(await readFile(report, 'utf8'));
+        assert.ok(timers.created > 0, `${format} must create a context close timer`);
+        assert.equal(timers.cleared, timers.created, `${format} must clear every context close timer`);
+        assert.equal(timers.fired, 0, `${format} must not wait for the close timer to expire`);
+        assert.equal(timers.pending, 0, `${format} left context close timers pending`);
+      }
+    });
+  });
+
+  /**
    * 3回の変換（既定の一括変換、設定と CSS を付けた一括変換、展開後と同じ文字を直接書いたヘッダーでの変換）の結果を突き合わせて確かめる。
    * 既定: タイトルは front matter（日本語）で`about:blank`にならず、作者などの front matter を文書情報に出さない。画像でないファイルは
    *   埋め込まずに警告する。Marp は 16:9 のスライド1枚が1ページになり、スライド内の図の失敗でも全スライドを出力する（通常の文書の
